@@ -1,8 +1,8 @@
 import 'package:flutter/material.dart';
-import 'book_flight_screen.dart';
 import 'logo_widget.dart';
 import 'home_screen.dart';
 import 'aircraft_database.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 class RegisterScreen extends StatefulWidget {
   const RegisterScreen({super.key});
@@ -17,10 +17,10 @@ class _RegisterScreenState extends State<RegisterScreen> {
     String? selectedAirfieldIcao;
     String? selectedAirfieldName;
     Future<void> loadAirfields() async {
-      final csvString = await DefaultAssetBundle.of(context).loadString('assets/airports.csv');
+      final localContext = context;
+      final csvString = await DefaultAssetBundle.of(localContext).loadString('assets/airports.csv');
       final lines = csvString.split('\n');
       if (lines.length < 2) return;
-      final header = lines[0].split(',');
       final nameIdx = 3; // Column D (0-based)
       final icaoIdx = 12; // Column M (0-based)
       allAirfields = lines.skip(1)
@@ -37,6 +37,7 @@ class _RegisterScreenState extends State<RegisterScreen> {
           })
           .whereType<Map<String, String>>()
           .toList();
+      if (!mounted) return;
       setState(() {});
     }
   final AircraftDatabase aircraftDb = AircraftDatabase();
@@ -47,6 +48,15 @@ class _RegisterScreenState extends State<RegisterScreen> {
   String? aircraftType;
   List<Map<String, String?>> aircraftList = [];
   bool nameEntered = false;
+
+  Future<void> setRegistrationComplete() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool('registrationComplete', true);
+    // Optionally store userName, aircraftList, homeAirfield for later use
+    if (userName != null) await prefs.setString('userName', userName!);
+    await prefs.setString('homeAirfield', selectedAirfieldName ?? '');
+    await prefs.setString('aircraftList', aircraftList.map((a) => a.toString()).join('|')); // crude serialization
+  }
 
 
   Future<String?> fetchAircraftType(String reg) async {
@@ -133,18 +143,19 @@ class _RegisterScreenState extends State<RegisterScreen> {
               const SizedBox(height: 24),
                 ElevatedButton(
                   onPressed: () async {
+                    final localContext = context;
                     if (_formKey.currentState!.validate()) {
                       _formKey.currentState!.save();
                       aircraftType = await fetchAircraftType(aircraftReg ?? '');
                       if (aircraftType == null) {
                         showDialog(
-                          context: context,
+                          context: localContext,
                           builder: (context) => AlertDialog(
                             title: const Text('Aircraft Not Found'),
                             content: Text('No ICAO type found for registration: $aircraftReg'),
                             actions: [
                               TextButton(
-                                onPressed: () => Navigator.of(context).pop(),
+                                onPressed: () => Navigator.of(localContext).pop(),
                                 child: const Text('OK'),
                               ),
                             ],
@@ -158,14 +169,14 @@ class _RegisterScreenState extends State<RegisterScreen> {
                       });
                       if (!nameEntered) nameEntered = true;
                       showDialog(
-                        context: context,
+                        context: localContext,
                         builder: (context) => AlertDialog(
                           title: const Text('Aircraft Registered'),
                           content: Text('Registration: $aircraftReg\nType: $aircraftType'),
                           actions: [
                             TextButton(
                               onPressed: () {
-                                Navigator.of(context).pop();
+                                Navigator.of(localContext).pop();
                                 _formKey.currentState!.reset();
                                 aircraftReg = null;
                                 aircraftType = null;
@@ -176,9 +187,10 @@ class _RegisterScreenState extends State<RegisterScreen> {
                               child: const Text('Add Another'),
                             ),
                             TextButton(
-                              onPressed: () {
-                                Navigator.of(context).pop();
-                                Navigator.of(context).pushReplacement(
+                              onPressed: () async {
+                                Navigator.of(localContext).pop();
+                                await setRegistrationComplete();
+                                Navigator.of(localContext).pushReplacement(
                                   MaterialPageRoute(
                                     builder: (context) => HomeScreen(
                                       aircraftList: List<Map<String, String?>>.from(aircraftList),

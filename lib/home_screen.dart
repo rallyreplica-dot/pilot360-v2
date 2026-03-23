@@ -1,8 +1,9 @@
 import 'package:flutter/material.dart';
 import 'logo_widget.dart';
 import 'book_flight_screen.dart';
-import 'flight_log_page.dart';
+
 import 'booked_flights_page.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 class HomeScreen extends StatefulWidget {
   final List<Map<String, String?>>? aircraftList;
@@ -22,9 +23,41 @@ class _HomeScreenState extends State<HomeScreen> {
     super.initState();
     if (widget.aircraftList != null) {
       aircraftList = widget.aircraftList!;
+    } else {
+      _loadAircraftListFromPrefs();
     }
     if (widget.homeAirfield != null) {
       homeAirfield = widget.homeAirfield;
+    } else {
+      _loadHomeAirfieldFromPrefs();
+    }
+  }
+
+  Future<void> _loadAircraftListFromPrefs() async {
+    final prefs = await SharedPreferences.getInstance();
+    final raw = prefs.getString('aircraftList') ?? '';
+    if (raw.isNotEmpty) {
+      // crude deserialization: each aircraft is a map string
+      final items = raw.split('|');
+      aircraftList = items.map((item) {
+        final regMatch = RegExp(r'registration: ([^,}]*)').firstMatch(item);
+        final typeMatch = RegExp(r'type: ([^,}]*)').firstMatch(item);
+        return {
+          'registration': regMatch != null ? regMatch.group(1) : '',
+          'type': typeMatch != null ? typeMatch.group(1) : '',
+        };
+      }).toList();
+      setState(() {});
+    }
+  }
+
+  Future<void> _loadHomeAirfieldFromPrefs() async {
+    final prefs = await SharedPreferences.getInstance();
+    final ha = prefs.getString('homeAirfield');
+    if (ha != null && ha.isNotEmpty) {
+      setState(() {
+        homeAirfield = ha;
+      });
     }
   }
 

@@ -29,29 +29,6 @@ class _BookedFlightsPageState extends State<BookedFlightsPage> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(title: const Text('Booked Flights')),
-      body: Column(
-        children: [
-          Padding(
-            padding: const EdgeInsets.all(16.0),
-            child: ElevatedButton.icon(
-              icon: const Icon(Icons.calendar_month),
-              label: const Text('View Calendar'),
-              onPressed: () async {
-                await Navigator.of(context).push(
-                  MaterialPageRoute(
-                    builder: (context) => const CalendarBookingsPage(),
-                  ),
-                );
-                // Refresh bookings after returning
-                loadBookings();
-              },
-            ),
-          ),
-          // Calendar is now the only view for bookings
-        ],
-      ),
-    );
+    return const CalendarBookingsPage();
   }
 }

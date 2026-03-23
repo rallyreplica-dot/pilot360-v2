@@ -4,29 +4,43 @@ import 'book_flight_screen.dart';
 import 'register_screen.dart';
 import 'flight_log_page.dart';
 import 'home_screen.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 void main() {
-  runApp(const MyApp());
+	runApp(const MyApp());
 }
 
 class MyApp extends StatelessWidget {
   const MyApp({super.key});
 
-  // This widget is the root of your application.
   @override
   Widget build(BuildContext context) {
-    return MaterialApp(
-      title: 'Flutter Demo',
-      theme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(seedColor: Colors.deepPurple),
-      ),
-      home: const RegisterScreen(),
-      routes: {
-        '/flight-log': (context) => const FlightLogPage(),
-        '/home': (context) => const HomeScreen(),
+    return FutureBuilder<bool>(
+      future: _checkRegistrationComplete(),
+      builder: (context, snapshot) {
+        if (!snapshot.hasData) {
+          return const MaterialApp(home: Scaffold(body: Center(child: CircularProgressIndicator())));
+        }
+        final registrationComplete = snapshot.data!;
+        return MaterialApp(
+          title: 'Flutter Demo',
+          theme: ThemeData(
+            colorScheme: ColorScheme.fromSeed(seedColor: Colors.deepPurple),
+          ),
+          home: registrationComplete ? HomeScreen() : const RegisterScreen(),
+          routes: {
+            '/flight-log': (context) => const FlightLogPage(),
+            '/home': (context) => const HomeScreen(),
+          },
+        );
       },
     );
   }
+}
+
+Future<bool> _checkRegistrationComplete() async {
+  final prefs = await SharedPreferences.getInstance();
+  return prefs.getBool('registrationComplete') ?? false;
 }
 
 class MyHomePage extends StatefulWidget {
