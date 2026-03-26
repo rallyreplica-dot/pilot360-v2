@@ -1,7 +1,17 @@
 
+import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:syncfusion_flutter_calendar/calendar.dart';
+
+// Booking event model for calendar
+class _BookingEvent {
+  final DateTime start;
+  final DateTime end;
+  final String raw; // Original JSON string for editing/deleting
+
+  _BookingEvent({required this.start, required this.end, required this.raw});
+}
 
 
 class CalendarBookingsPage extends StatefulWidget {
@@ -12,6 +22,13 @@ class CalendarBookingsPage extends StatefulWidget {
 }
 
 class _CalendarBookingsPageState extends State<CalendarBookingsPage> {
+    Future<void> clearAllBookings() async {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.remove('flightBookings');
+      setState(() {
+        events = [];
+      });
+    }
   bool isLoading = true;
   List<_BookingEvent> events = [];
 
@@ -28,42 +45,66 @@ class _CalendarBookingsPageState extends State<CalendarBookingsPage> {
     // Parse bookings into _BookingEvent list
     final List<_BookingEvent> loadedEvents = [];
     for (final raw in bookings) {
-      // Parse booking string to map
-      final reg = RegExp(r"(\w+): ([^,}]+)");
-      Map<String, String> bookingMap = {};
-      for (final m in reg.allMatches(raw)) {
-        bookingMap[m.group(1)!] = m.group(2)!.trim();
-      }
-      // Parse date/time for start/end
       try {
+        final Map<String, dynamic> bookingMap = jsonDecode(raw);
+        final type = (bookingMap['typeOfFlight'] ?? '').toString().toUpperCase();
         final dateStr = bookingMap['date'] ?? '';
         final etdStr = bookingMap['etd'] ?? '';
-        final etaStr = bookingMap['eta'] ?? '';
-        if (dateStr.isNotEmpty && etdStr.isNotEmpty && etaStr.isNotEmpty) {
-          final parts = dateStr.split('/');
-          final day = int.parse(parts[0]);
-          final month = int.parse(parts[1]);
-          final year = 2000 + int.parse(parts[2]);
-          final etdParts = etdStr.split(':');
-          final etaParts = etaStr.split(':');
-          final start = DateTime(year, month, day, int.parse(etdParts[0]), etdParts.length > 1 ? int.parse(etdParts[1]) : 0);
-          final end = DateTime(year, month, day, int.parse(etaParts[0]), etaParts.length > 1 ? int.parse(etaParts[1]) : 0);
-          loadedEvents.add(_BookingEvent(start: start, end: end, raw: raw));
+        int parseYear(String y) {
+          if (y.length == 2) return 2000 + int.parse(y);
+          if (y.length == 4) return int.parse(y);
+          throw FormatException('Year must be 2 or 4 digits');
         }
-        // Add return leg as separate event if present
-        final returnDateStr = bookingMap['returnDate'] ?? '';
-        final returnEtaStr = bookingMap['returnEta'] ?? '';
-        if (returnDateStr.isNotEmpty && returnEtaStr.isNotEmpty) {
-          final parts = returnDateStr.split('/');
+        List<int>? parseDMY(String dateStr) {
+          final parts = dateStr.split('/');
+          if (parts.length != 3) return null;
           final day = int.parse(parts[0]);
           final month = int.parse(parts[1]);
-          final year = 2000 + int.parse(parts[2]);
-          final etaParts = returnEtaStr.split(':');
-          final start = DateTime(year, month, day, int.parse(etaParts[0]), etaParts.length > 1 ? int.parse(etaParts[1]) : 0);
-          final end = start.add(const Duration(minutes: 30));
-          loadedEvents.add(_BookingEvent(start: start, end: end, raw: raw));
+          final year = parseYear(parts[2]);
+          return [day, month, year];
+        }
+        List<int> parseTime(String timeStr) {
+          timeStr = timeStr.trim();
+          if (timeStr.contains(':')) {
+            final parts = timeStr.split(':');
+            final hour = int.parse(parts[0]);
+            final minute = parts.length > 1 ? int.parse(parts[1]) : 0;
+            return [hour, minute];
+          } else if (timeStr.length == 4) {
+            return [int.parse(timeStr.substring(0, 2)), int.parse(timeStr.substring(2, 4))];
+          } else if (timeStr.length == 3) {
+            return [int.parse(timeStr.substring(0, 1)), int.parse(timeStr.substring(1, 3))];
+          } else if (timeStr.length == 2) {
+            return [int.parse(timeStr), 0];
+          } else if (timeStr.length == 1) {
+            return [int.parse(timeStr), 0];
+          } else {
+            return [0, 0];
+          }
+        }
+        if (dateStr.isNotEmpty && etdStr.isNotEmpty) {
+          final dmy = parseDMY(dateStr);
+          if (dmy != null) {
+            final day = dmy[0], month = dmy[1], year = dmy[2];
+            final etdParts = parseTime(etdStr);
+            final start = DateTime(year, month, day, etdParts[0], etdParts[1]);
+            final end = start.add(const Duration(hours: 1)); // Always single-day event
+            final isDuplicate = loadedEvents.any((e) => e.start == start && e.end == end && e.raw == raw);
+            if (!isDuplicate) {
+              loadedEvents.add(_BookingEvent(start: start, end: end, raw: raw));
+            }
+          }
         }
       } catch (_) {}
+    }
+    // Debug print: show all raw bookings and parsed events
+    debugPrint('Raw bookings from SharedPreferences:');
+    for (final raw in bookings) {
+      debugPrint(raw);
+    }
+    debugPrint('Parsed events:');
+    for (final event in loadedEvents) {
+      debugPrint('Event: start=${event.start}, end=${event.end}, raw=${event.raw}');
     }
     setState(() {
       events = loadedEvents;
@@ -83,163 +124,86 @@ class _CalendarBookingsPageState extends State<CalendarBookingsPage> {
     await showModalBottomSheet(
       context: localContext,
       isScrollControlled: true,
-      builder: (context) => Padding(
-        padding: const EdgeInsets.only(top: 16, left: 8, right: 8, bottom: 24),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            for (final event in dayEvents)
-              Card(
-                margin: const EdgeInsets.symmetric(vertical: 6),
-                child: ListTile(
-                  title: const Text(
-                    'Booking',
-                    style: TextStyle(color: Colors.white),
-                  ),
-                  subtitle: Text(
-                    _formatBookingTimeRange(event.start, event.end),
-                    style: const TextStyle(color: Colors.white70),
-                  ),
-                  tileColor: Colors.blueAccent,
-                  onTap: () async {
-                    final localContext2 = localContext;
-                    if (!mounted) return;
-                    Navigator.pop(localContext2); // Close the dialog
-                    // Parse booking map from event.raw
-                    Map<String, String> bookingMap = {};
-                    final reg = RegExp(r"(\w+): ([^,}]+)");
-                    for (final m in reg.allMatches(event.raw)) {
-                      bookingMap[m.group(1)!] = m.group(2)!.trim();
-                    }
-                    final result = await Navigator.of(localContext2).push(
-                      MaterialPageRoute(
-                        builder: (context) => _EditBookingScreen(
-                          originalRaw: event.raw,
-                          initialBooking: bookingMap,
+      builder: (context) => ListView.builder(
+        shrinkWrap: true,
+        itemCount: dayEvents.length,
+        itemBuilder: (context, index) {
+          final event = dayEvents[index];
+          final bookingMap = Map<String, String>.from(jsonDecode(event.raw));
+          return Padding(
+            padding: const EdgeInsets.all(16.0),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text('Booking details:', style: Theme.of(context).textTheme.titleLarge),
+                const SizedBox(height: 16),
+                ..._filteredBookingFields(bookingMap).map((e) => Text('${e.key}: ${e.value}')),
+                Padding(
+                  padding: const EdgeInsets.only(top: 24.0),
+                  child: ElevatedButton(
+                    onPressed: () async {
+                      final confirm = await showDialog<bool>(
+                        context: localContext,
+                        builder: (context) => AlertDialog(
+                          title: const Text('Cancel Booking'),
+                          content: const Text('Are you sure you want to cancel this booking?'),
+                          actions: [
+                            TextButton(
+                              onPressed: () => Navigator.of(context).pop(false),
+                              child: const Text('No'),
+                            ),
+                            TextButton(
+                              onPressed: () => Navigator.of(context).pop(true),
+                              child: const Text('Yes'),
+                            ),
+                          ],
                         ),
-                      ),
-                    );
-                    if (result == true) {
-                      loadBookings();
-                    }
-                  },
-                  trailing: Builder(
-                    builder: (context) {
-                      // Only allow deleting the outbound event if it is not a return leg
-                      Map<String, String> bookingMap = {};
-                      final reg = RegExp(r"(\w+): ([^,}]+)");
-                      for (final m in reg.allMatches(event.raw)) {
-                        bookingMap[m.group(1)!] = m.group(2)!.trim();
-                      }
-                      final isReturnLeg =
-                          bookingMap['returnDate'] != null &&
-                          bookingMap['returnDate']!.isNotEmpty &&
-                          event.start.day.toString().padLeft(2, '0') ==
-                              bookingMap['returnDate']!.split('/')[0] &&
-                          event.start.month.toString().padLeft(2, '0') ==
-                              bookingMap['returnDate']!.split('/')[1];
-                      // Only allow delete for outbound if not a return leg, and for return leg only allow delete if it is the return event
-                      return IconButton(
-                        icon: const Icon(Icons.delete, color: Colors.white),
-                        tooltip: isReturnLeg
-                            ? 'Cancel Return Flight'
-                            : 'Cancel Booking',
-                        onPressed: () async {
-                          final localContext3 = localContext;
-                          if (!isReturnLeg) {
-                            // Outbound: normal delete
-                            final confirm = await showDialog<bool>(
-                              context: localContext3,
-                              builder: (context) => AlertDialog(
-                                title: const Text('Cancel Booking'),
-                                content: const Text(
-                                  'Are you sure you want to cancel this booking?',
-                                ),
-                                actions: [
-                                  TextButton(
-                                    onPressed: () => Navigator.of(localContext3).pop(false),
-                                    child: const Text('No'),
-                                  ),
-                                  TextButton(
-                                    onPressed: () => Navigator.of(localContext3).pop(true),
-                                    child: const Text('Yes'),
-                                  ),
-                                ],
-                              ),
-                            );
-                            if (confirm == true) {
-                              final prefs = await SharedPreferences.getInstance();
-                              final bookings = prefs.getStringList('flightBookings') ?? [];
-                              bookings.remove(event.raw);
-                              await prefs.setStringList('flightBookings', bookings);
-                              if (!mounted) return;
-                              Navigator.pop(localContext3); // Close the dialog
-                              loadBookings();
-                            }
-                          } else {
-                            // Return leg: do not allow deleting the outbound, only allow removing the return leg fields
-                            final confirm = await showDialog<bool>(
-                              context: localContext3,
-                              builder: (context) => AlertDialog(
-                                title: const Text('Cancel Return Flight'),
-                                content: const Text(
-                                  'Are you sure you want to cancel just the return leg? The outbound booking will remain.',
-                                ),
-                                actions: [
-                                  TextButton(
-                                    onPressed: () => Navigator.of(localContext3).pop(false),
-                                    child: const Text('No'),
-                                  ),
-                                  TextButton(
-                                    onPressed: () => Navigator.of(localContext3).pop(true),
-                                    child: const Text('Yes'),
-                                  ),
-                                ],
-                              ),
-                            );
-                            if (confirm == true) {
-                              final prefs = await SharedPreferences.getInstance();
-                              final bookings = prefs.getStringList('flightBookings') ?? [];
-                              // Remove only the return leg fields from the booking string
-                              // Parse the booking string to a map, clear return fields, and update
-                              Map<String, String> map = {};
-                              for (final m in reg.allMatches(event.raw)) {
-                                map[m.group(1)!] = m.group(2)!.trim();
-                              }
-                              map['returnDate'] = '';
-                              map['returnEta'] = '';
-                              map['returnPob'] = '';
-                              map['returnDeparture'] = '';
-                              // Rebuild the booking string
-                              final newRaw = map.entries
-                                  .map((e) => '${e.key}: ${e.value}')
-                                  .join(', ');
-                              final idx = bookings.indexOf(event.raw);
-                              if (idx != -1) {
-                                bookings[idx] = newRaw;
-                                await prefs.setStringList('flightBookings', bookings);
-                              }
-                              if (!mounted) return;
-                              Navigator.pop(localContext3); // Close the dialog
-                              loadBookings();
-                            }
-                          }
-                        },
                       );
+                      if (confirm == true) {
+                        final prefs = await SharedPreferences.getInstance();
+                        final bookings = prefs.getStringList('flightBookings') ?? [];
+                        bookings.remove(event.raw);
+                        await prefs.setStringList('flightBookings', bookings);
+                        if (!mounted) return;
+                        Navigator.pop(localContext); // Close the dialog
+                        loadBookings();
+                      }
                     },
+                    child: const Text('Delete'),
                   ),
                 ),
-              ),
-          ],
-        ),
+              ],
+            ),
+          );
+        },
       ),
     );
+  }
+
+  // Helper to filter booking fields for display
+  List<MapEntry<String, String>> _filteredBookingFields(Map<String, String> booking) {
+    final isReturnLeg = (booking['typeOfFlight']?.toUpperCase() == 'RETURN');
+    final fields = <String, String>{...booking};
+    if (isReturnLeg) {
+      return [
+        if (fields['date'] != null && fields['date']!.isNotEmpty) MapEntry('date', fields['date']!),
+        if (fields['aircraft'] != null && fields['aircraft']!.isNotEmpty) MapEntry('aircraft', fields['aircraft']!),
+        if (fields['departure'] != null && fields['departure']!.isNotEmpty) MapEntry('departure', fields['departure']!),
+        if (fields['destination'] != null && fields['destination']!.isNotEmpty) MapEntry('destination', fields['destination']!),
+        if (fields['etd'] != null && fields['etd']!.isNotEmpty) MapEntry('eta', fields['etd']!),
+        if (fields['pob'] != null && fields['pob']!.isNotEmpty) MapEntry('pob', fields['pob']!),
+      ];
+    } else {
+      return fields.entries.where((e) => !e.key.startsWith('return') && e.value.isNotEmpty).toList();
+    }
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('Bookings Calendar')),
+      appBar: AppBar(
+        title: const Text('Bookings Calendar'),
+      ),
       body: isLoading
           ? const Center(child: CircularProgressIndicator())
           : SfCalendar(
@@ -247,23 +211,15 @@ class _CalendarBookingsPageState extends State<CalendarBookingsPage> {
               dataSource: _BookingDataSource(events),
               monthViewSettings: const MonthViewSettings(
                 showAgenda: true,
-                agendaItemHeight: 50,
-                appointmentDisplayMode: MonthAppointmentDisplayMode.indicator,
-              ),
-              timeSlotViewSettings: const TimeSlotViewSettings(
-                timeFormat: 'HH:mm',
               ),
               onTap: (details) {
                 if (details.date != null) {
                   final selectedDate = details.date!;
-                  final bookingsForDay = events
-                      .where(
-                        (e) =>
-                            e.start.year == selectedDate.year &&
-                            e.start.month == selectedDate.month &&
-                            e.start.day == selectedDate.day,
-                      )
-                      .toList();
+                  final bookingsForDay = events.where((event) =>
+                    event.start.year == selectedDate.year &&
+                    event.start.month == selectedDate.month &&
+                    event.start.day == selectedDate.day
+                  ).toList();
                   if (bookingsForDay.isNotEmpty) {
                     _showDayBookingsDialog(bookingsForDay);
                   }
@@ -274,12 +230,66 @@ class _CalendarBookingsPageState extends State<CalendarBookingsPage> {
   }
 }
 
-class _BookingEvent {
-  final DateTime start;
-  final DateTime end;
-  final String raw;
+// DataSource for SfCalendar
 
-  _BookingEvent({required this.start, required this.end, required this.raw});
+
+// Edit Booking Screen
+// ...existing code...
+
+// Edit Booking Form
+class EditBookingForm extends StatelessWidget {
+  final Map<String, String> booking;
+  final Future<void> Function(Map<String, String>)? onSave;
+
+  const EditBookingForm({
+    super.key,
+    required this.booking,
+    this.onSave,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.all(16.0),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text('Booking details:', style: Theme.of(context).textTheme.titleLarge),
+          const SizedBox(height: 16),
+          ..._filteredBookingFields().map((e) => Text('${e.key}: ${e.value}')),
+          if (onSave != null)
+            Padding(
+              padding: const EdgeInsets.only(top: 24.0),
+              child: ElevatedButton(
+                onPressed: () => onSave!(booking),
+                child: const Text('Save'),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  // Only show relevant fields for each leg
+  List<MapEntry<String, String>> _filteredBookingFields() {
+    final isReturnLeg = (booking['typeOfFlight']?.toUpperCase() == 'RETURN');
+    final fields = <String, String>{...booking};
+    if (isReturnLeg) {
+      // For return leg, show only: date, aircraft, departure, destination, eta (from etd), pob
+      // Show 'eta' as the arrival at return airfield (from 'etd' field)
+      return [
+        if (fields['date'] != null && fields['date']!.isNotEmpty) MapEntry('date', fields['date']!),
+        if (fields['aircraft'] != null && fields['aircraft']!.isNotEmpty) MapEntry('aircraft', fields['aircraft']!),
+        if (fields['departure'] != null && fields['departure']!.isNotEmpty) MapEntry('departure', fields['departure']!),
+        if (fields['destination'] != null && fields['destination']!.isNotEmpty) MapEntry('destination', fields['destination']!),
+        if (fields['etd'] != null && fields['etd']!.isNotEmpty) MapEntry('eta', fields['etd']!),
+        if (fields['pob'] != null && fields['pob']!.isNotEmpty) MapEntry('pob', fields['pob']!),
+      ];
+    } else {
+      // For outbound leg, show all except return fields
+      return fields.entries.where((e) => !e.key.startsWith('return') && e.value.isNotEmpty).toList();
+    }
+  }
 }
 
 class _BookingDataSource extends CalendarDataSource {
@@ -313,83 +323,7 @@ class _BookingDataSource extends CalendarDataSource {
   }
 }
 
-class _EditBookingScreen extends StatefulWidget {
-  final String originalRaw;
-  final Map<String, String> initialBooking;
-
-  const _EditBookingScreen({
-    required this.originalRaw,
-    required this.initialBooking,
-  });
-
-  @override
-  State<_EditBookingScreen> createState() => _EditBookingScreenState();
-}
-
-class _EditBookingScreenState extends State<_EditBookingScreen> {
-  late Map<String, String> booking;
-
-  @override
-  void initState() {
-    super.initState();
-    booking = Map<String, String>.from(widget.initialBooking);
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final localContext = context;
-    return Scaffold(
-      appBar: AppBar(title: const Text('Edit Booking')),
-      body: EditBookingForm(
-        booking: booking,
-        onSave: (updatedBooking) async {
-          final prefs = await SharedPreferences.getInstance();
-          final bookings = prefs.getStringList('flightBookings') ?? [];
-          bookings.remove(widget.originalRaw);
-          bookings.add(updatedBooking.toString());
-          await prefs.setStringList('flightBookings', bookings);
-          if (!mounted) return;
-          Navigator.of(localContext).pop(true);
-        },
-      ),
-    );
-  }
-}
-
-class EditBookingForm extends StatelessWidget {
-  final Map<String, String> booking;
-  final Future<void> Function(Map<String, String>)? onSave;
-
-  const EditBookingForm({
-    super.key,
-    required this.booking,
-    this.onSave,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    // Minimal placeholder UI for now
-    return Padding(
-      padding: const EdgeInsets.all(16.0),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text('Booking details:', style: Theme.of(context).textTheme.titleLarge),
-          const SizedBox(height: 16),
-          ...booking.entries.map((e) => Text('${e.key}: ${e.value}')),
-          if (onSave != null)
-            Padding(
-              padding: const EdgeInsets.only(top: 24.0),
-              child: ElevatedButton(
-                onPressed: () => onSave!(booking),
-                child: const Text('Save'),
-              ),
-            ),
-        ],
-      ),
-    );
-  }
-}
+// ...existing code...
 
 
 

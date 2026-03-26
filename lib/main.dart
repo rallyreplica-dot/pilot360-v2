@@ -15,24 +15,15 @@ class MyApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return FutureBuilder<bool>(
-      future: _checkRegistrationComplete(),
-      builder: (context, snapshot) {
-        if (!snapshot.hasData) {
-          return const MaterialApp(home: Scaffold(body: Center(child: CircularProgressIndicator())));
-        }
-        final registrationComplete = snapshot.data!;
-        return MaterialApp(
-          title: 'Flutter Demo',
-          theme: ThemeData(
-            colorScheme: ColorScheme.fromSeed(seedColor: Colors.deepPurple),
-          ),
-          home: registrationComplete ? HomeScreen() : const RegisterScreen(),
-          routes: {
-            '/flight-log': (context) => const FlightLogPage(),
-            '/home': (context) => const HomeScreen(),
-          },
-        );
+    return MaterialApp(
+      title: 'Flutter Demo',
+      theme: ThemeData(
+        colorScheme: ColorScheme.fromSeed(seedColor: Colors.deepPurple),
+      ),
+      home: const RegisterScreen(),
+      routes: {
+        '/flight-log': (context) => const FlightLogPage(),
+        '/home': (context) => const HomeScreen(),
       },
     );
   }

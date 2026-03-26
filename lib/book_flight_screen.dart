@@ -1,566 +1,843 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:csv/csv.dart';
+import 'email_service.dart';
 
-import 'aircraft_database.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'dart:convert';
+
+import 'calendar_bookings_page.dart';
+import 'package:daylight/daylight.dart' as daylight;
 
 class BookFlightScreen extends StatefulWidget {
-  final String? userName;
   final List<Map<String, String?>>? aircraftList;
   final String? homeAirfield;
-  const BookFlightScreen({super.key, this.userName, this.aircraftList, this.homeAirfield});
+  const BookFlightScreen({super.key, this.aircraftList, this.homeAirfield});
 
   @override
   State<BookFlightScreen> createState() => _BookFlightScreenState();
 }
 
 class _BookFlightScreenState extends State<BookFlightScreen> {
-    final TextEditingController _etdController = TextEditingController();
-    final TextEditingController _etaController = TextEditingController();
+  // Helper: Send email to tower for approval using Resend API
+  Future<void> _sendApprovalEmail({
+    required bool outOfHours,
+    required bool runwayLights,
+  }) async {
+    final subject = outOfHours && runwayLights
+        ? 'Out of Hours & Runway Lights Request'
+        : outOfHours
+            ? 'Out of Hours Request'
+            : 'Runway Lights Request';
+    final body = StringBuffer();
+    body.writeln('A booking requires approval:');
+    if (outOfHours) body.writeln('- Out of hours operation requested');
+    if (runwayLights) body.writeln('- Runway lights requested');
+    body.writeln('');
+    body.writeln('Booking Details:');
+    final dateStr = _flightDate != null
+        ? '${_flightDate!.day.toString().padLeft(2, '0')}/${_flightDate!.month.toString().padLeft(2, '0')}/${_flightDate!.year}'
+        : '';
+    body.writeln('Date: $dateStr');
+    body.writeln('Aircraft: ${_selectedAircraftReg ?? ''}');
+    body.writeln('Departure: ${_departureController.text}');
+    body.writeln('Destination: ${_destinationController.text}');
+    body.writeln('ETD: ${_etdController.text}');
+    body.writeln('ETA: ${_etaController.text}');
+    body.writeln('Return ETA: ${_returnEtaController.text}');
+
+    // TODO: Store API key securely, not in code
+    const resendApiKey = 're_Adzg2wYC_8nawn5NWmiAdvCVR9GcW1vtw';
+
+    try {
+      final emailService = EmailService(apiKey: resendApiKey);
+      final sent = await emailService.sendRequestEmail(
+        toEmail: 'bw36320@gmail.com',
+        subject: subject,
+        body: body.toString(),
+      );
+      if (!sent) {
+        _showBookingError('Could not send email. Please try again.');
+      }
+    } catch (e) {
+      _showBookingError('Error sending email: \n' + e.toString());
+    }
+  }
+
+  // Helper: Check if ETA is before ETD (for current form values)
+  bool _isEtaBeforeEtd() {
+    final dateStr = _flightDate != null
+        ? '${_flightDate!.day.toString().padLeft(2, '0')}/${_flightDate!.month.toString().padLeft(2, '0')}/${_flightDate!.year}'
+        : '';
+    final etd = _combineDateTime(dateStr, _etdController.text);
+    final eta = _combineDateTime(dateStr, _etaController.text);
+    return etd != null && eta != null && eta.isBefore(etd);
+  }
+
+  // Helper: Parse date string (dd/mm/yyyy)
+  List<int>? _parseDMY(String dateStr) {
+    final parts = dateStr.split('/');
+    if (parts.length != 3) return null;
+    int parseYear(String y) {
+      if (y.length == 2) return 2000 + int.parse(y);
+      if (y.length == 4) return int.parse(y);
+      throw FormatException('Year must be 2 or 4 digits');
+    }
+
+    final day = int.parse(parts[0]);
+    final month = int.parse(parts[1]);
+    final year = parseYear(parts[2]);
+    return [day, month, year];
+  }
+
+  // Helper: Get DateTime from date string and time string
+  DateTime? _combineDateTime(String dateStr, String timeStr) {
+    final dmy = _parseDMY(dateStr);
+    final t = _parseTime(timeStr);
+    if (dmy == null || t == null) return null;
+    return DateTime(dmy[2], dmy[1], dmy[0], t.hour, t.minute);
+  }
+
+  // Helper: Show error dialog
+  Future<void> _showBookingError(String message) async {
+    if (!mounted) return;
+    await showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Booking Error'),
+        content: Text(message),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('OK'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // State for request buttons
+  bool _outOfHoursRequested = false;
+  bool _runwayLightsRequested = false;
+
+  // Helper to parse time string (HH:MM or HHMM)
+  TimeOfDay? _parseTime(String value) {
+    String hourStr = '', minStr = '';
+    if (value.contains(":")) {
+      final parts = value.split(":");
+      if (parts.length != 2) return null;
+      hourStr = parts[0];
+      minStr = parts[1];
+    } else if (value.length == 4) {
+      hourStr = value.substring(0, 2);
+      minStr = value.substring(2, 4);
+    } else {
+      return null;
+    }
+    final hour = int.tryParse(hourStr);
+    final minute = int.tryParse(minStr);
+    if (hour == null ||
+        minute == null ||
+        hour < 0 ||
+        hour > 23 ||
+        minute < 0 ||
+        minute > 59) {
+      return null;
+    }
+    return TimeOfDay(hour: hour, minute: minute);
+  }
+
+  // Check if any time is out of hours
+  bool _isAnyTimeOutOfHours() {
+    final etd = _parseTime(_etdController.text);
+    final eta = _parseTime(_etaController.text);
+    final returnEta = _parseTime(_returnEtaController.text);
+    bool out = false;
+    for (final t in [etd, eta, returnEta]) {
+      if (t == null) continue;
+      if (t.hour < _openingTime.hour ||
+          (t.hour == _openingTime.hour && t.minute < _openingTime.minute)) {
+        out = true;
+      }
+      if (t.hour > _closingTime.hour ||
+          (t.hour == _closingTime.hour && t.minute > _closingTime.minute)) {
+        out = true;
+      }
+    }
+    return out;
+  }
+
+  // Check if any time is before sunrise or after sunset
+  bool _isAnyTimeNeedsRunwayLights() {
+    if (_sunriseTime == null || _sunsetTime == null) return false;
+    final etd = _parseTime(_etdController.text);
+    final eta = _parseTime(_etaController.text);
+    final returnEta = _parseTime(_returnEtaController.text);
+    bool needs = false;
+    for (final t in [etd, eta, returnEta]) {
+      if (t == null) continue;
+      if (t.hour < _sunriseTime!.hour ||
+          (t.hour == _sunriseTime!.hour && t.minute < _sunriseTime!.minute)) {
+        needs = true;
+      }
+      if (t.hour > _sunsetTime!.hour ||
+          (t.hour == _sunsetTime!.hour && t.minute > _sunsetTime!.minute)) {
+        needs = true;
+      }
+    }
+    return needs;
+  }
+
+  DateTime? _flightDate;
+  DateTime? _returnDate;
+  List<String> _airfieldNames = [];
+  final List<Map<String, String>> _airfieldRecords = [];
+  final TextEditingController _destinationController = TextEditingController();
   final _formKey = GlobalKey<FormState>();
-  final AircraftDatabase aircraftDb = AircraftDatabase();
-  List<Map<String, String>> allAirfields = [];
-  String? selectedAircraftReg;
-  String? selectedAircraftType;
-  String? selectedDepartureIcao;
-  String? selectedDepartureName;
-  String? selectedDestinationIcao;
-  String? selectedDestinationName;
-  String? etd;
-  String? eta;
-  String? pob;
-  String? flightType; // PRIVATE, COMMERCIAL, etc. (legacy, not used)
-  String? typeOfFlight; // LOCAL, CIRCUIT, LANDAWAY
-  String? returnDate;
-  String? returnEta;
-  String? returnPob;
-  String? returnDepartureName;
-  String? returnDestinationName;
-  final TextEditingController _returnEtaController = TextEditingController();
-  String? notes;
-  String? flightDate;
-  bool wantsReturnFlight = false;
-  final TextEditingController _dateController = TextEditingController();
+  String? _selectedAircraftReg;
+  final TextEditingController _departureController = TextEditingController();
+  // Define normal operating hours
+  final TimeOfDay _openingTime = const TimeOfDay(hour: 9, minute: 0);
+  final TimeOfDay _closingTime = const TimeOfDay(hour: 17, minute: 0);
+  TimeOfDay? _sunriseTime;
+  TimeOfDay? _sunsetTime;
+
+  // London coordinates
+  static const double _londonLat = 51.5074;
+  static const double _londonLng = -0.1278;
 
   @override
   void initState() {
     super.initState();
-    aircraftDb.load();
-    WidgetsBinding.instance.addPostFrameCallback((_) => loadAirfields());
+    if (widget.homeAirfield != null && widget.homeAirfield!.isNotEmpty) {
+      _departureController.text = widget.homeAirfield!;
+    }
+    _calculateSunriseSunset();
+    _loadAirfieldNames();
+    // Ensure aircraft registrations are uppercase
+    if (widget.aircraftList != null) {
+      for (final aircraft in widget.aircraftList!) {
+        if (aircraft['registration'] != null) {
+          aircraft['registration'] = aircraft['registration']!.toUpperCase();
+        }
+      }
+    }
   }
 
-  Future<void> loadAirfields() async {
-    final csvString = await DefaultAssetBundle.of(context).loadString('assets/airports.csv');
-    final lines = csvString.split('\n');
-    if (lines.length < 2) return;
-    final nameIdx = 3; // Column D
-    final icaoIdx = 12; // Column M
-    allAirfields = lines.skip(1)
-        .where((line) => line.trim().isNotEmpty)
-        .map((line) {
-          final fields = line.split(',');
-          if (fields.length > icaoIdx && fields[icaoIdx].trim().isNotEmpty) {
-            return {
-              'name': fields[nameIdx].trim(),
-              'icao': fields[icaoIdx].trim(),
-            };
+  Future<void> _loadAirfieldNames() async {
+    if (!mounted) return;
+    final data = await DefaultAssetBundle.of(
+      context,
+    ).loadString('assets/airports.csv');
+    final rows = const CsvToListConverter(eol: '\n').convert(data);
+    if (rows.isNotEmpty) {
+      final headers = rows.first.map((e) => e.toString()).toList();
+      final nameIdx = headers.indexOf('name');
+      _airfieldNames = rows
+          .skip(1)
+          .where(
+            (row) =>
+                row.length > nameIdx &&
+                row[nameIdx].toString().trim().isNotEmpty,
+          )
+          .map((row) => row[nameIdx].toString().toUpperCase())
+          .toList();
+      _airfieldNames.sort();
+      setState(() {});
+    }
+  }
+
+  Future<void> _calculateSunriseSunset() async {
+    final now = DateTime.now();
+    final location = daylight.DaylightLocation(_londonLat, _londonLng);
+    final calc = daylight.DaylightCalculator(location);
+    final result = calc.calculateForDay(now);
+    final sunriseUtc = result.sunrise;
+    final sunsetUtc = result.sunset;
+    // Convert UTC to local time
+    final sunrise = sunriseUtc?.toLocal();
+    final sunset = sunsetUtc?.toLocal();
+    setState(() {
+      _sunriseTime = sunrise != null
+          ? TimeOfDay(hour: sunrise.hour, minute: sunrise.minute)
+          : null;
+      _sunsetTime = sunset != null
+          ? TimeOfDay(hour: sunset.hour, minute: sunset.minute)
+          : null;
+    });
+  }
+
+  String? _selectedTypeOfFlight;
+  final TextEditingController _etdController = TextEditingController();
+  final TextEditingController _etaController = TextEditingController();
+  final TextEditingController _pobController = TextEditingController();
+  bool _bookReturnFlight = false;
+  final TextEditingController _returnEtdController = TextEditingController();
+  final TextEditingController _returnEtaController = TextEditingController();
+  final TextEditingController _returnPobController = TextEditingController();
+
+  @override
+  void dispose() {
+    _departureController.dispose();
+    _etdController.dispose();
+    _etaController.dispose();
+    _pobController.dispose();
+    _destinationController.dispose();
+    _returnEtdController.dispose();
+    _returnEtaController.dispose();
+    _returnPobController.dispose();
+    super.dispose();
+  }
+
+  // Helper to get airfield record by name (uppercase)
+  Map<String, String>? _getAirfieldRecordByName(String name) {
+    return _airfieldRecords.firstWhere(
+      (record) => (record['name']?.toUpperCase() ?? '') == name.toUpperCase(),
+      orElse: () => {},
+    );
+  }
+
+  Future<void> _saveBooking() async {
+    if (!_formKey.currentState!.validate()) return;
+
+    // Build booking map
+    final booking = <String, dynamic>{
+      'date': _flightDate != null
+          ? '${_flightDate!.day.toString().padLeft(2, '0')}/${_flightDate!.month.toString().padLeft(2, '0')}/${_flightDate!.year}'
+          : '',
+      'aircraft': _selectedAircraftReg ?? '',
+      'departure': _departureController.text,
+      'typeOfFlight': _selectedTypeOfFlight ?? '',
+      'destination': _destinationController.text,
+      'etd': _etdController.text,
+      'eta': _etaController.text,
+      'pob': _pobController.text,
+      'returnDate': _returnDate != null
+          ? '${_returnDate!.day.toString().padLeft(2, '0')}/${_returnDate!.month.toString().padLeft(2, '0')}/${_returnDate!.year}'
+          : '',
+      'returnEta': _returnEtaController.text,
+      'returnPob': _returnPobController.text,
+    };
+
+    final prefs = await SharedPreferences.getInstance();
+    final bookings = prefs.getStringList('flightBookings') ?? [];
+
+    // --- VALIDATION RULES ---
+    final type = (booking['typeOfFlight'] ?? '').toString().toUpperCase();
+    final aircraft = booking['aircraft'] ?? '';
+    final dateStr = booking['date'] ?? '';
+    final etdStr = booking['etd'] ?? '';
+    final etaStr = booking['eta'] ?? '';
+    final etd = _combineDateTime(dateStr, etdStr);
+    final eta = _combineDateTime(dateStr, etaStr);
+    // 1. No double-booking for same aircraft
+    for (final raw in bookings) {
+      try {
+        final Map<String, dynamic> b = jsonDecode(raw);
+        if ((b['aircraft'] ?? '') != aircraft) continue;
+        final bDate = b['date'] ?? '';
+        final bEtd = _combineDateTime(bDate, b['etd'] ?? '');
+        final bEta = _combineDateTime(bDate, b['eta'] ?? '');
+        if (bEtd == null) continue;
+        final bEnd = bEta ?? bEtd.add(const Duration(hours: 1));
+        final newEnd = eta ?? etd?.add(const Duration(hours: 1));
+        if (etd != null &&
+            newEnd != null &&
+            bEtd.isBefore(newEnd) &&
+            etd.isBefore(bEnd)) {
+          await _showBookingError(
+            'This aircraft is already booked during the selected time.',
+          );
+          return;
+        }
+      } catch (_) {}
+    }
+    // 2. Landing after take-off
+    if (etd != null && eta != null && eta.isBefore(etd)) {
+      await _showBookingError('Landing time cannot be before take-off time.');
+      return;
+    }
+    // 3. Circuit flight hourly slots
+    if (type == 'CIRCUIT') {
+      if (etd == null || eta == null) {
+        await _showBookingError(
+          'Please enter both ETD and ETA for circuit flights.',
+        );
+        return;
+      }
+      if (etd.minute != 0 || eta.minute != 0) {
+        await _showBookingError(
+          'Circuit flights must start and end exactly on the hour (e.g., 10:00–11:00).',
+        );
+        return;
+      }
+      if (eta.difference(etd).inMinutes != 60) {
+        await _showBookingError(
+          'Circuit flights must be exactly 1 hour in duration (e.g., 10:00–11:00).',
+        );
+        return;
+      }
+      // 4. Circuit flight max concurrency
+      int concurrent = 0;
+      for (final raw in bookings) {
+        try {
+          final Map<String, dynamic> b = jsonDecode(raw);
+          if ((b['typeOfFlight'] ?? '').toString().toUpperCase() != 'CIRCUIT') {
+            continue;
           }
-          return null;
-        })
-        .whereType<Map<String, String>>()
-        .toList();
-    setState(() {});
+          final bDate = b['date'] ?? '';
+          final bEtd = _combineDateTime(bDate, b['etd'] ?? '');
+          final bEta = _combineDateTime(bDate, b['eta'] ?? '');
+          if (bEtd == null || bEta == null) continue;
+          // Check if this booking overlaps the same hour slot
+          if (bEtd == etd && bEta == eta) concurrent++;
+        } catch (_) {}
+      }
+      if (concurrent >= 3) {
+        await _showBookingError(
+          'Maximum of 3 aircraft can be booked for circuits in the same hour.',
+        );
+        return;
+      }
+    }
+
+    // For Landaway with return, add two entries: outbound and return
+    if ((_selectedTypeOfFlight ?? '').toUpperCase() == 'LANDAWAY' &&
+        _bookReturnFlight &&
+        _returnDate != null &&
+        _returnEtaController.text.isNotEmpty) {
+      bookings.add(jsonEncode(booking));
+      // Return leg as a separate booking (swap departure/destination, use return date/eta/pob)
+      final returnBooking = Map<String, dynamic>.from(booking);
+      returnBooking['date'] = booking['returnDate'];
+      returnBooking['etd'] = booking['returnEta'];
+      returnBooking['eta'] = '';
+      returnBooking['pob'] = booking['returnPob'];
+      returnBooking['departure'] = booking['destination'];
+      returnBooking['destination'] = booking['departure'];
+      returnBooking['typeOfFlight'] = 'RETURN';
+      bookings.add(jsonEncode(returnBooking));
+    } else {
+      bookings.add(jsonEncode(booking));
+    }
+
+    await prefs.setStringList('flightBookings', bookings);
+
+    if (mounted) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('Booking submitted!')));
+      // Navigate to bookings calendar after submission
+      await Future.delayed(
+        const Duration(milliseconds: 500),
+      ); // Let snackbar show briefly
+      Navigator.of(context).pushAndRemoveUntil(
+        MaterialPageRoute(builder: (context) => CalendarBookingsPage()),
+        (route) => route.isFirst,
+      );
+    }
   }
 
   @override
   Widget build(BuildContext context) {
-    // ...existing code...
-    // Remove duplicate registrations
-    final aircraftListRaw = widget.aircraftList ?? [];
-    final seenRegs = <String>{};
-    final aircraftList = aircraftListRaw.where((aircraft) {
-      final reg = (aircraft['registration'] ?? '').toUpperCase();
-      if (seenRegs.contains(reg)) return false;
-      seenRegs.add(reg);
-      return true;
-    }).toList();
-    // Ensure selectedAircraftReg is valid (always uppercase)
-    if (selectedAircraftReg != null &&
-        !aircraftList.any((a) => (a['registration'] ?? '').toUpperCase() == selectedAircraftReg)) {
-      selectedAircraftReg = null;
-    }
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('Book a Flight'),
-      ),
-      body: Padding(
+      appBar: AppBar(title: const Text('BOOK FLIGHT')),
+      body: SingleChildScrollView(
         padding: const EdgeInsets.all(16.0),
         child: Form(
           key: _formKey,
-          child: ListView(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              // Aircraft selection
-              DropdownButtonFormField<String>(
-                value: selectedAircraftReg,
-                decoration: const InputDecoration(labelText: 'Aircraft'),
-                items: aircraftList.map<DropdownMenuItem<String>>((aircraft) {
-                  final reg = (aircraft['registration'] ?? '').toUpperCase();
-                  final type = (aircraft['type'] ?? '').toUpperCase();
-                  return DropdownMenuItem<String>(
-                    value: reg,
-                    child: Text('$reg ($type)'),
+              // Flight Date Picker
+              GestureDetector(
+                onTap: () async {
+                  final picked = await showDatePicker(
+                    context: context,
+                    initialDate: _flightDate ?? DateTime.now(),
+                    firstDate: DateTime.now(),
+                    lastDate: DateTime.now().add(const Duration(days: 365)),
                   );
-                }).toList(),
+                  if (picked != null) {
+                    setState(() {
+                      _flightDate = picked;
+                    });
+                  }
+                },
+                child: AbsorbPointer(
+                  child: TextFormField(
+                    decoration: InputDecoration(
+                      labelText: 'DATE OF FLIGHT',
+                      hintText: 'SELECT DATE OF FLIGHT',
+                    ),
+                    controller: TextEditingController(
+                      text: _flightDate != null
+                          ? '${_flightDate!.day.toString().padLeft(2, '0')}/${_flightDate!.month.toString().padLeft(2, '0')}/${_flightDate!.year}'
+                          : '',
+                    ),
+                    validator: (value) =>
+                        _flightDate == null ? 'SELECT DATE OF FLIGHT' : null,
+                    readOnly: true,
+                  ),
+                ),
+              ),
+              const SizedBox(height: 16),
+              DropdownButtonFormField<String>(
+                initialValue: _selectedAircraftReg,
+                decoration: const InputDecoration(labelText: 'AIRCRAFT'),
+                items: (widget.aircraftList ?? [])
+                    .map((aircraft) => aircraft['registration']?.toUpperCase())
+                    .where((reg) => reg != null && reg.isNotEmpty)
+                    .toSet()
+                    .toList()
+                    .map(
+                      (reg) => DropdownMenuItem<String>(
+                        value: reg,
+                        child: Text(
+                          reg ?? '',
+                          style: const TextStyle(letterSpacing: 1.5),
+                        ),
+                      ),
+                    )
+                    .toList(),
                 onChanged: (value) {
                   setState(() {
-                    selectedAircraftReg = value;
-                    selectedAircraftType = aircraftDb.getTypeForRegistration(value ?? '') ?? '';
+                    _selectedAircraftReg = value;
                   });
                 },
-                validator: (value) => value == null || value.isEmpty ? 'Select aircraft' : null,
+                validator: (value) =>
+                    value == null || value.isEmpty ? 'SELECT AIRCRAFT' : null,
               ),
-                  TextFormField(
-                    initialValue: etd ?? '',
-                  Autocomplete<Map<String, String>>(
-                    optionsBuilder: (TextEditingValue textEditingValue) {
-                      if (textEditingValue.text == '') {
-                        return const Iterable<Map<String, String>>.empty();
-                      }
-                      return allAirfields.where((airfield) {
-                        final name = (airfield['name'] ?? '').toUpperCase();
-                        final icao = (airfield['icao'] ?? '').toUpperCase();
-                        final input = textEditingValue.text.toUpperCase();
-                        return name.contains(input) || icao.contains(input);
-                      });
-                    },
-                    displayStringForOption: (airfield) => airfield['name']?.toUpperCase() ?? '',
-                    fieldViewBuilder: (context, controller, focusNode, onFieldSubmitted) {
-                      if (selectedDepartureName != null) {
-                        controller.text = selectedDepartureName!;
-                      } else if (widget.homeAirfield != null && (controller.text.isEmpty || controller.text != widget.homeAirfield)) {
-                        controller.text = widget.homeAirfield!;
-                        selectedDepartureName = widget.homeAirfield;
-                      }
-                      return TextFormField(
-                        controller: controller,
-                        focusNode: focusNode,
-                        decoration: const InputDecoration(
-                          labelText: 'Departure Airfield',
-                          border: OutlineInputBorder(),
-                        ),
-                        validator: (value) => value == null || value.isEmpty ? 'Select departure airfield' : null,
+              const SizedBox(height: 16),
+              TextFormField(
+                controller: _departureController,
+                decoration: const InputDecoration(
+                  labelText: 'DEPARTURE AIRFIELD',
+                ),
+                textCapitalization: TextCapitalization.characters,
+                style: const TextStyle(letterSpacing: 1.5),
+                inputFormatters: [UpperCaseTextFormatter()],
+                validator: (value) => value == null || value.isEmpty
+                    ? 'ENTER DEPARTURE AIRFIELD'
+                    : null,
+              ),
+              const SizedBox(height: 16),
+              DropdownButtonFormField<String>(
+                initialValue: _selectedTypeOfFlight,
+                decoration: const InputDecoration(labelText: 'TYPE OF FLIGHT'),
+                items: const [
+                  DropdownMenuItem(value: 'LOCAL', child: Text('LOCAL')),
+                  DropdownMenuItem(value: 'CIRCUIT', child: Text('CIRCUIT')),
+                  DropdownMenuItem(value: 'LANDAWAY', child: Text('LANDAWAY')),
+                ],
+                onChanged: (value) {
+                  setState(() {
+                    _selectedTypeOfFlight = value;
+                  });
+                },
+                validator: (value) => value == null || value.isEmpty
+                    ? 'SELECT TYPE OF FLIGHT'
+                    : null,
+              ),
+              const SizedBox(height: 16),
+              if (_selectedTypeOfFlight == 'LANDAWAY') ...[
+                Autocomplete<String>(
+                  optionsBuilder: (TextEditingValue textEditingValue) {
+                    if (textEditingValue.text == '') {
+                      return const Iterable<String>.empty();
+                    }
+                    return _airfieldNames.where((String option) {
+                      return option.contains(
+                        textEditingValue.text.toUpperCase(),
                       );
-                    },
-                    onSelected: (airfield) {
-                      setState(() {
-                        selectedDepartureIcao = airfield['icao'];
-                        selectedDepartureName = airfield['name'];
-                      });
-                    },
-                  ),
-                  const SizedBox(height: 16),
-                  // Type of flight
-                  DropdownButtonFormField<String>(
-                    value: typeOfFlight,
-                    decoration: const InputDecoration(labelText: 'Type of Flight'),
-                    items: const [
-                      DropdownMenuItem(value: 'LOCAL', child: Text('LOCAL')),
-                      DropdownMenuItem(value: 'CIRCUIT', child: Text('CIRCUIT')),
-                      DropdownMenuItem(value: 'LANDAWAY', child: Text('LANDAWAY')),
-                    ],
-                    onChanged: (value) {
-                      setState(() {
-                        typeOfFlight = value;
-                      });
-                    },
-                    validator: (value) => value == null || value.isEmpty ? 'Select type of flight' : null,
-                  ),
-                  const SizedBox(height: 16),
-                  // ETD field (moved outside Dropdown items)
-                  TextFormField(
-                    initialValue: etd ?? '',
-                    controller: _etdController,
-                    decoration: const InputDecoration(labelText: 'ETD (24h, e.g. 14:30)'),
-                    keyboardType: TextInputType.datetime,
-                    onSaved: (value) => etd = value,
-                    validator: (value) {
-                      if (value == null || value.isEmpty) return 'Enter ETD';
-                      final now = TimeOfDay.now();
-                      String hourStr = '', minStr = '';
-                      if (value.contains(':')) {
-                        final parts = value.split(':');
-                        if (parts.length != 2) return 'Enter ETD as HH:MM or HHMM';
-                        hourStr = parts[0];
-                        minStr = parts[1];
-                      } else if (value.length == 4) {
-                        hourStr = value.substring(0, 2);
-                        minStr = value.substring(2, 4);
-                      } else {
-                        return 'Enter ETD as HH:MM or HHMM';
-                      }
-                      final hour = int.tryParse(hourStr);
-                      final minute = int.tryParse(minStr);
-                      if (hour == null || minute == null || hour < 0 || hour > 23 || minute < 0 || minute > 59) {
-                        return 'Enter valid time (e.g. 20:00 or 2000)';
-                      }
-                      final etdTime = TimeOfDay(hour: hour, minute: minute);
-                      // Only check if flightDate is today or not set
-                      final today = DateTime.now();
-                      final dateText = _dateController.text.trim();
-                      bool isToday = false;
-                      if (dateText == '') {
-                        isToday = true;
-                      } else {
-                        // Accept both DD/MM/YY and DD/MM/YYYY
-                        final parts = dateText.split('/');
-                        if (parts.length == 3) {
-                          final day = int.tryParse(parts[0]);
-                          final month = int.tryParse(parts[1]);
-                          var year = int.tryParse(parts[2]);
-                          if (year != null && year < 100) {
-                            year += 2000;
-                          }
-                          if (day == today.day && month == today.month && year == today.year) {
-                            isToday = true;
-                          }
-                        }
-                      }
-                      if (isToday) {
-                        if (etdTime.hour < now.hour || (etdTime.hour == now.hour && etdTime.minute < now.minute)) {
-                          return 'ETD cannot be before current time';
-                        }
-                      }
-                      return null;
-                    },
-                  ),
-                  const SizedBox(height: 16),
-                  // Date field
-                  TextFormField(
-                    controller: _dateController,
-                    readOnly: true,
-                    decoration: const InputDecoration(labelText: 'Date (DD/MM/YY)'),
-                    onTap: () async {
-                      FocusScope.of(context).requestFocus(FocusNode());
-                      DateTime? picked = await showDatePicker(
-                        context: context,
-                        initialDate: DateTime.now(),
-                        firstDate: DateTime(2000),
-                        lastDate: DateTime(2100),
-                      );
-                      if (picked != null) {
-                        setState(() {
-                          final year2 = picked.year % 100;
-                          flightDate = "${picked.day.toString().padLeft(2, '0')}/${picked.month.toString().padLeft(2, '0')}/${year2.toString().padLeft(2, '0')}";
-                          _dateController.text = flightDate!;
-                        });
-                      }
-                    },
-                    onSaved: (value) => flightDate = value,
-                    validator: (value) {
-                      if (value == null || value.isEmpty) return 'Enter date';
-                      final regex = RegExp(r'^\d{2}/\d{2}/\d{2,4}$');
-                      if (!regex.hasMatch(value)) {
-                        return 'Format must be DD/MM/YY';
-                      }
-                      return null;
-                    },
-                  ),
-                  const SizedBox(height: 16),
-                  // Destination airfield autocomplete and ETD for LANDAWAY main leg
-                  if (typeOfFlight == 'LANDAWAY') ...[
-                    // Destination airfield autocomplete
-                    Autocomplete<Map<String, String>>(
-                      optionsBuilder: (TextEditingValue textEditingValue) {
-                        if (textEditingValue.text == '') {
-                          return const Iterable<Map<String, String>>.empty();
-                        }
-                        return allAirfields.where((airfield) {
-                          final name = (airfield['name'] ?? '').toUpperCase();
-                          final icao = (airfield['icao'] ?? '').toUpperCase();
-                          final input = textEditingValue.text.toUpperCase();
-                          return name.contains(input) || icao.contains(input);
-                        });
-                      },
-                      displayStringForOption: (airfield) => airfield['name']?.toUpperCase() ?? '',
-                      fieldViewBuilder: (context, controller, focusNode, onFieldSubmitted) {
-                        if (selectedDestinationName != null) {
-                          controller.text = selectedDestinationName!;
-                        }
+                    });
+                  },
+                  fieldViewBuilder:
+                      (context, controller, focusNode, onFieldSubmitted) {
+                        controller.text = _destinationController.text;
                         return TextFormField(
                           controller: controller,
                           focusNode: focusNode,
                           decoration: const InputDecoration(
-                            labelText: 'Destination Airfield',
-                            border: OutlineInputBorder(),
+                            labelText: 'DESTINATION',
                           ),
-                          validator: (value) => value == null || value.isEmpty ? 'Select destination airfield' : null,
+                          textCapitalization: TextCapitalization.characters,
+                          style: const TextStyle(letterSpacing: 1.5),
+                          inputFormatters: [UpperCaseTextFormatter()],
+                          onChanged: (value) {
+                            _destinationController.text = value.toUpperCase();
+                            controller.value = controller.value.copyWith(
+                              text: value.toUpperCase(),
+                              selection: TextSelection.collapsed(
+                                offset: value.length,
+                              ),
+                            );
+                          },
+                          validator: (value) => value == null || value.isEmpty
+                              ? 'ENTER DESTINATION'
+                              : null,
                         );
                       },
-                      onSelected: (airfield) {
+                  onSelected: (String selection) {
+                    _destinationController.text = selection;
+                  },
+                ),
+                const SizedBox(height: 16),
+              ],
+              TextFormField(
+                controller: _etdController,
+                decoration: const InputDecoration(labelText: 'ETD'),
+                keyboardType: TextInputType.datetime,
+                textCapitalization: TextCapitalization.characters,
+                style: const TextStyle(letterSpacing: 1.5),
+                inputFormatters: [UpperCaseTextFormatter()],
+                onChanged: (value) {
+                  setState(() {});
+                },
+                validator: (value) {
+                  if (value == null || value.isEmpty) return 'ENTER ETD';
+                  if (_parseTime(value) == null) {
+                    return 'INVALID TIME FORMAT (HH:MM)';
+                  }
+                  return null;
+                },
+              ),
+              const SizedBox(height: 16),
+              if (_selectedTypeOfFlight != 'LANDAWAY') ...[
+                TextFormField(
+                  controller: _etaController,
+                  decoration: const InputDecoration(labelText: 'ETA'),
+                  keyboardType: TextInputType.datetime,
+                  textCapitalization: TextCapitalization.characters,
+                  style: const TextStyle(letterSpacing: 1.5),
+                  inputFormatters: [UpperCaseTextFormatter()],
+                  onChanged: (value) {
+                    final upper = value.toUpperCase();
+                    if (value != upper) {
+                      _etaController.value = _etaController.value.copyWith(
+                        text: upper,
+                        selection: TextSelection.collapsed(
+                          offset: upper.length,
+                        ),
+                      );
+                    }
+                    setState(() {});
+                  },
+                  validator: (value) {
+                    if (_selectedTypeOfFlight != 'LANDAWAY' &&
+                        (value == null || value.isEmpty)) {
+                      return 'ENTER ETA';
+                    }
+                    if (value != null && value.isNotEmpty) {
+                      if (_parseTime(value) == null) {
+                        return 'INVALID TIME FORMAT (HH:MM)';
+                      }
+                    }
+                    return null;
+                  },
+                ),
+                const SizedBox(height: 16),
+              ],
+              TextFormField(
+                controller: _pobController,
+                decoration: const InputDecoration(labelText: 'POB'),
+                keyboardType: TextInputType.number,
+                textCapitalization: TextCapitalization.characters,
+                style: const TextStyle(letterSpacing: 1.5),
+                inputFormatters: [UpperCaseTextFormatter()],
+                validator: (value) =>
+                    value == null || value.isEmpty ? 'ENTER POB' : null,
+              ),
+              const SizedBox(height: 16),
+              if (_selectedTypeOfFlight == 'LANDAWAY') ...[
+                Row(
+                  children: [
+                    Checkbox(
+                      value: _bookReturnFlight,
+                      onChanged: (val) {
                         setState(() {
-                          selectedDestinationIcao = airfield['icao'];
-                          selectedDestinationName = airfield['name'];
+                          _bookReturnFlight = val ?? false;
                         });
                       },
                     ),
-                    const SizedBox(height: 16),
-                    // ETD field
-                    TextFormField(
-                      controller: _etdController,
-                      decoration: const InputDecoration(labelText: 'ETD (24h, e.g. 14:30)'),
-                      keyboardType: TextInputType.datetime,
-                      onSaved: (value) => etd = value,
-                      validator: (value) {
-                        if (value == null || value.isEmpty) return 'Enter ETD';
-                        final now = TimeOfDay.now();
-                        String hourStr = '', minStr = '';
-                        if (value.contains(':')) {
-                          final parts = value.split(':');
-                          if (parts.length != 2) return 'Enter ETD as HH:MM or HHMM';
-                          hourStr = parts[0];
-                          minStr = parts[1];
-                        } else if (value.length == 4) {
-                          hourStr = value.substring(0, 2);
-                          minStr = value.substring(2, 4);
-                        } else {
-                          return 'Enter ETD as HH:MM or HHMM';
-                        }
-                        final hour = int.tryParse(hourStr);
-                        final minute = int.tryParse(minStr);
-                        if (hour == null || minute == null || hour < 0 || hour > 23 || minute < 0 || minute > 59) {
-                          return 'Enter valid time (e.g. 20:00 or 2000)';
-                        }
-                        final etdTime = TimeOfDay(hour: hour, minute: minute);
-                        // Only check if flightDate is today or not set
-                        final today = DateTime.now();
-                        final dateText = _dateController.text.trim();
-                        bool isToday = false;
-                        if (dateText == '') {
-                          isToday = true;
-                        } else {
-                          // Accept both DD/MM/YY and DD/MM/YYYY
-                          final parts = dateText.split('/');
-                          if (parts.length == 3) {
-                            final day = int.tryParse(parts[0]);
-                            final month = int.tryParse(parts[1]);
-                            var year = int.tryParse(parts[2]);
-                            if (year != null && year < 100) {
-                              year += 2000;
-                            }
-                            if (day == today.day && month == today.month && year == today.year) {
-                              isToday = true;
-                            }
-                          }
-                        }
-                        if (isToday) {
-                          if (etdTime.hour < now.hour || (etdTime.hour == now.hour && etdTime.minute < now.minute)) {
-                            return 'ETD cannot be before current time';
-                          }
-                        }
-                        return null;
-                      },
-                    ),
-                    const SizedBox(height: 16),
+                    const Text('BOOK RETURN FLIGHT'),
                   ],
-                  // ETA (only if not LANDAWAY)
-                  if (typeOfFlight != 'LANDAWAY') ...[
-                    TextFormField(
-                      controller: _etaController,
-                      decoration: const InputDecoration(labelText: 'ETA (24h, e.g. 15:45)'),
-                      keyboardType: TextInputType.datetime,
-                      onSaved: (value) => eta = value,
-                      validator: (value) {
-                        if (value == null || value.isEmpty) return 'Enter ETA';
-                        final etdValue = _etdController.text;
-                        if (etdValue.isEmpty) return null; // Only check if ETD is filled
-                        String parseHour(String t) => t.contains(':') ? t.split(':')[0] : t.substring(0, 2);
-                        String parseMin(String t) => t.contains(':') ? t.split(':')[1] : t.substring(t.length - 2);
-                        final etaHour = int.tryParse(parseHour(value));
-                        final etaMin = int.tryParse(parseMin(value));
-                        final etdHour = int.tryParse(parseHour(etdValue));
-                        final etdMin = int.tryParse(parseMin(etdValue));
-                        if (etaHour == null || etaMin == null || etdHour == null || etdMin == null) return 'Enter ETA as HH:MM or HHMM';
-                        if (etaHour < etdHour || (etaHour == etdHour && etaMin < etdMin)) {
-                          return 'ETA cannot be before ETD';
-                        }
-                        return null;
-                      },
-                    ),
-                    const SizedBox(height: 16),
-                  ],
-                  // POB
-                  TextFormField(
-                    decoration: const InputDecoration(labelText: 'Persons On Board (POB)'),
-                    keyboardType: TextInputType.number,
-                    onSaved: (value) => pob = value,
-                    validator: (value) => value == null || value.isEmpty ? 'Enter POB' : null,
-                  ),
+                ),
+                if (_bookReturnFlight) ...[
                   const SizedBox(height: 16),
-                  // Flight category
-                  DropdownButtonFormField<String>(
-                    value: flightType,
-                    decoration: const InputDecoration(labelText: 'Flight Category'),
-                    items: const [
-                      DropdownMenuItem(value: 'TRAINING', child: Text('TRAINING')),
-                      DropdownMenuItem(value: 'PRIVATE', child: Text('PRIVATE')),
-                    ],
-                    onChanged: (value) => setState(() => flightType = value),
-                    validator: (value) => value == null || value.isEmpty ? 'Select flight category' : null,
-                  ),
-                  const SizedBox(height: 16),
-                  if (flightType == 'TRAINING')
-                    TextFormField(
-                      decoration: const InputDecoration(labelText: 'Notes (student/instructor, details)'),
-                      maxLines: 2,
-                      onSaved: (value) => notes = value,
-                      validator: (value) => value == null || value.isEmpty ? 'Enter notes for training flight' : null,
-                    ),
-                  if (flightType == 'TRAINING') const SizedBox(height: 16),
-                  // Return flight prompt and fields (only for landaway)
-                  if (typeOfFlight == 'LANDAWAY') ...[
-                    Row(
-                      children: [
-                        const Text('Do you wish to book a return flight?'),
-                        const SizedBox(width: 12),
-                        ChoiceChip(
-                          label: const Text('Yes'),
-                          selected: wantsReturnFlight,
-                          onSelected: (selected) => setState(() => wantsReturnFlight = true),
-                        ),
-                        const SizedBox(width: 8),
-                        ChoiceChip(
-                          label: const Text('No'),
-                          selected: !wantsReturnFlight,
-                          onSelected: (selected) => setState(() => wantsReturnFlight = false),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 16),
-                    if (wantsReturnFlight) ...[
-                      // Editable Destination for return leg
-                      TextFormField(
-                        decoration: const InputDecoration(labelText: 'Destination'),
-                        initialValue: returnDestinationName ?? '',
-                        onChanged: (value) {
-                          setState(() {
-                            returnDestinationName = value;
-                          });
-                        },
-                        onSaved: (value) => returnDestinationName = value,
-                        validator: (value) => value == null || value.isEmpty ? 'Enter destination' : null,
-                      ),
-                      const SizedBox(height: 16),
-                      TextFormField(
-                        readOnly: true,
-                        controller: TextEditingController(text: returnDate ?? ''),
-                        decoration: const InputDecoration(labelText: 'Return Date (DD/MM/YY)'),
-                        onTap: () async {
-                          FocusScope.of(context).requestFocus(FocusNode());
-                          DateTime? picked = await showDatePicker(
-                            context: context,
-                            initialDate: DateTime.now(),
-                            firstDate: DateTime(2000),
-                            lastDate: DateTime(2100),
-                          );
-                          if (picked != null) {
-                            setState(() {
-                              final year2 = picked.year % 100;
-                              returnDate = "${picked.day.toString().padLeft(2, '0')}/${picked.month.toString().padLeft(2, '0')}/${year2.toString().padLeft(2, '0')}";
-                            });
-                          }
-                        },
-                        onSaved: (value) => returnDate = value,
-                        validator: (value) => value == null || value.isEmpty ? 'Enter return date' : null,
-                      ),
-                      const SizedBox(height: 16),
-                      TextFormField(
-                        controller: _returnEtaController,
-                        decoration: const InputDecoration(labelText: 'ETA at Destination (Return)'),
-                        keyboardType: TextInputType.datetime,
-                        onSaved: (value) => returnEta = value,
-                        validator: (value) {
-                          if (value == null || value.isEmpty) return 'Enter ETA at destination';
-                          String hourStr = '', minStr = '';
-                          if (value.contains(':')) {
-                            final parts = value.split(':');
-                            if (parts.length != 2) return 'Enter ETA as HH:MM or HHMM';
-                            hourStr = parts[0];
-                            minStr = parts[1];
-                          } else if (value.length == 4) {
-                            hourStr = value.substring(0, 2);
-                            minStr = value.substring(2, 4);
-                          } else {
-                            return 'Enter ETA as HH:MM or HHMM';
-                          }
-                          final hour = int.tryParse(hourStr);
-                          final minute = int.tryParse(minStr);
-                          if (hour == null || minute == null || hour < 0 || hour > 23 || minute < 0 || minute > 59) {
-                            return 'Enter valid time (e.g. 20:00 or 2000)';
-                          }
-                          return null;
-                        },
-                      ),
-                      const SizedBox(height: 16),
-                      TextFormField(
-                        decoration: const InputDecoration(labelText: 'Return POB'),
-                        keyboardType: TextInputType.number,
-                        onSaved: (value) => returnPob = value,
-                        validator: (value) => value == null || value.isEmpty ? 'Enter return POB' : null,
-                      ),
-                      const SizedBox(height: 16),
-                    ],
-                  ],
-                  ElevatedButton(
-                    onPressed: () async {
-                      if (_formKey.currentState!.validate()) {
-                        _formKey.currentState!.save();
-                        // Always update returnEta from controller
-                        returnEta = _returnEtaController.text;
-                        final prefs = await SharedPreferences.getInstance();
-                        final booking = {
-                          'aircraft': (selectedAircraftReg ?? '').toUpperCase(),
-                          'aircraftType': selectedAircraftType ?? '',
-                          'departure': selectedDepartureName ?? '',
-                          'destination': selectedDestinationName ?? '',
-                          'date': flightDate ?? '',
-                          'etd': etd ?? '',
-                          'eta': eta ?? '',
-                          'pob': pob ?? '',
-                          'flightType': flightType ?? '',
-                          'typeOfFlight': typeOfFlight ?? '',
-                          'returnDeparture': wantsReturnFlight ? (selectedDestinationName ?? '') : '',
-                          'returnDestination': wantsReturnFlight ? (returnDestinationName ?? '') : '',
-                          'returnDate': wantsReturnFlight ? (returnDate ?? '') : '',
-                          'returnEta': wantsReturnFlight ? (returnEta ?? '') : '',
-                          'returnPob': wantsReturnFlight ? (returnPob ?? '') : '',
-                          'notes': notes ?? '',
-                        };
-                        final List<String> bookings = prefs.getStringList('flightBookings') ?? [];
-                        bookings.add(booking.toString());
-                        await prefs.setStringList('flightBookings', bookings);
-                        // Only use context if still mounted
-                        final localContext = context;
-                        if (!mounted) return;
-                        showDialog(
-                          context: localContext,
-                          builder: (context) => AlertDialog(
-                            title: const Text('Flight Booked'),
-                            content: Text('Flight booked for ${booking['aircraft']} (${booking['aircraftType']}) from ${booking['departure']}${typeOfFlight == 'LANDAWAY' ? ' to ${booking['destination']}' : ''}${wantsReturnFlight ? ' with return flight.' : '.'}'),
-                            actions: [
-                              TextButton(
-                                onPressed: () => Navigator.of(localContext).pop(),
-                                child: const Text('OK'),
-                              ),
-                            ],
-                          ),
-                        );
+                  GestureDetector(
+                    onTap: () async {
+                      final picked = await showDatePicker(
+                        context: context,
+                        initialDate: _returnDate ?? DateTime.now(),
+                        firstDate: DateTime.now(),
+                        lastDate: DateTime.now().add(const Duration(days: 365)),
+                      );
+                      if (picked != null) {
+                        setState(() {
+                          _returnDate = picked;
+                        });
                       }
                     },
-                    child: const Text('Book Flight'),
+                    child: AbsorbPointer(
+                      child: TextFormField(
+                        decoration: InputDecoration(
+                          labelText: 'RETURN DATE',
+                          hintText: 'SELECT RETURN DATE',
+                        ),
+                        controller: TextEditingController(
+                          text: _returnDate != null
+                              ? '${_returnDate!.day.toString().padLeft(2, '0')}/${_returnDate!.month.toString().padLeft(2, '0')}/${_returnDate!.year}'
+                              : '',
+                        ),
+                        validator: (value) =>
+                            _returnDate == null ? 'SELECT RETURN DATE' : null,
+                        readOnly: true,
+                      ),
+                    ),
                   ),
+                  const SizedBox(height: 16),
+                  TextFormField(
+                    controller: _returnEtaController,
+                    decoration: const InputDecoration(
+                      labelText: 'RETURN ETA AT DESTINATION',
+                    ),
+                    keyboardType: TextInputType.datetime,
+                    textCapitalization: TextCapitalization.characters,
+                    style: const TextStyle(letterSpacing: 1.5),
+                    inputFormatters: [UpperCaseTextFormatter()],
+                    onChanged: (value) {
+                      setState(() {});
+                    },
+                    validator: (value) {
+                      if (value == null || value.isEmpty) {
+                        return 'ENTER RETURN ETA AT DESTINATION';
+                      }
+                      if (_parseTime(value) == null) {
+                        return 'INVALID TIME FORMAT (HH:MM)';
+                      }
+                      return null;
+                    },
+                  ),
+                  const SizedBox(height: 16),
+                  TextFormField(
+                    controller: _returnPobController,
+                    decoration: const InputDecoration(labelText: 'RETURN POB'),
+                    keyboardType: TextInputType.number,
+                    textCapitalization: TextCapitalization.characters,
+                    style: const TextStyle(letterSpacing: 1.5),
+                    inputFormatters: [UpperCaseTextFormatter()],
+                    validator: (value) => value == null || value.isEmpty
+                        ? 'ENTER RETURN POB'
+                        : null,
+                  ),
+                  const SizedBox(height: 16),
                 ],
+              ],
+              if (_sunriseTime != null && _sunsetTime != null) ...[
+                Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 8.0),
+                  child: Text(
+                    'LONDON SUNRISE: ${_sunriseTime!.format(context)}  SUNSET: ${_sunsetTime!.format(context)}',
+                    style: const TextStyle(fontWeight: FontWeight.bold),
+                  ),
+                ),
+              ],
+              const SizedBox(height: 24),
+              if (!_isEtaBeforeEtd()) ...[
+                if (_isAnyTimeOutOfHours())
+                  Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 8.0),
+                    child: ElevatedButton(
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: _outOfHoursRequested
+                            ? Colors.green
+                            : null,
+                      ),
+                      onPressed: _outOfHoursRequested
+                          ? null
+                          : () async {
+                              setState(() {
+                                _outOfHoursRequested = true;
+                              });
+                              await _sendApprovalEmail(
+                                outOfHours: true,
+                                runwayLights: false,
+                              );
+                            },
+                      child: const Text('Out of Hours Request'),
+                    ),
+                  ),
+                if (_isAnyTimeNeedsRunwayLights())
+                  Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 8.0),
+                    child: ElevatedButton(
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: _runwayLightsRequested
+                            ? Colors.green
+                            : null,
+                      ),
+                      onPressed: _runwayLightsRequested
+                          ? null
+                          : () async {
+                              setState(() {
+                                _runwayLightsRequested = true;
+                              });
+                              await _sendApprovalEmail(
+                                outOfHours: false,
+                                runwayLights: true,
+                              );
+                            },
+                      child: const Text('Request Runway Lights'),
+                    ),
+                  ),
+              ] else ...[
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 8.0),
+                  child: Text(
+                    'Landing time cannot be before take-off time.',
+                    style: TextStyle(
+                      color: Colors.red,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                ),
+              ],
+              Center(
+                child: ElevatedButton(
+                  onPressed: _isEtaBeforeEtd()
+                      ? null
+                      : () async {
+                          // Require request buttons if needed
+                          if (_isAnyTimeOutOfHours() && !_outOfHoursRequested) {
+                            return;
+                          }
+                          if (_isAnyTimeNeedsRunwayLights() &&
+                              !_runwayLightsRequested) {
+                            return;
+                          }
+                          await _saveBooking();
+                        },
+                  child: const Text('SUBMIT'),
+                ),
               ),
-            ),
+            ],
           ),
-        );
-      }
-    }
+        ),
+      ),
+    );
+  }
+}
+
+class UpperCaseTextFormatter extends TextInputFormatter {
+  @override
+  TextEditingValue formatEditUpdate(
+    TextEditingValue oldValue,
+    TextEditingValue newValue,
+  ) {
+    return newValue.copyWith(
+      text: newValue.text.toUpperCase(),
+      selection: newValue.selection,
+    );
+  }
+}
