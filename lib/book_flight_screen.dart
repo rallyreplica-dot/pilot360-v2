@@ -5,6 +5,7 @@ import 'email_service.dart';
 
 import 'package:shared_preferences/shared_preferences.dart';
 import 'dart:convert';
+import 'package:http/http.dart' as http;
 
 import 'calendar_bookings_page.dart';
 import 'package:daylight/daylight.dart' as daylight;
@@ -19,6 +20,7 @@ class BookFlightScreen extends StatefulWidget {
 }
 
 class _BookFlightScreenState extends State<BookFlightScreen> {
+  final String baseUrl = "https://skycommand-api.onrender.com";
   // Helper: Send email to tower for approval using Resend API
   Future<void> _sendApprovalEmail({
     required bool outOfHours,
@@ -36,15 +38,15 @@ class _BookFlightScreenState extends State<BookFlightScreen> {
     body.writeln('');
     body.writeln('Booking Details:');
     final dateStr = _flightDate != null
-        ? '${_flightDate!.day.toString().padLeft(2, '0')}/${_flightDate!.month.toString().padLeft(2, '0')}/${_flightDate!.year}'
-        : '';
-    body.writeln('Date: $dateStr');
+      ? '${_flightDate!.toUtc().year.toString().padLeft(4, '0')}-${_flightDate!.toUtc().month.toString().padLeft(2, '0')}-${_flightDate!.toUtc().day.toString().padLeft(2, '0')}'
+      : '';
+    body.writeln('Date (UTC): $dateStr');
     body.writeln('Aircraft: ${_selectedAircraftReg ?? ''}');
     body.writeln('Departure: ${_departureController.text}');
     body.writeln('Destination: ${_destinationController.text}');
-    body.writeln('ETD: ${_etdController.text}');
-    body.writeln('ETA: ${_etaController.text}');
-    body.writeln('Return ETA: ${_returnEtaController.text}');
+    body.writeln('ETD (UTC): ${_etdController.text}');
+    body.writeln('ETA (UTC): ${_etaController.text}');
+    body.writeln('Return ETA (UTC): ${_returnEtaController.text}');
 
     // TODO: Store API key securely, not in code
     const resendApiKey = 're_Adzg2wYC_8nawn5NWmiAdvCVR9GcW1vtw';
@@ -229,7 +231,7 @@ class _BookFlightScreenState extends State<BookFlightScreen> {
     final data = await DefaultAssetBundle.of(
       context,
     ).loadString('assets/airports.csv');
-    final rows = const CsvToListConverter(eol: '\n').convert(data);
+    final rows = Csv().decode(data).toList();
     if (rows.isNotEmpty) {
       final headers = rows.first.map((e) => e.toString()).toList();
       final nameIdx = headers.indexOf('name');
@@ -300,6 +302,13 @@ class _BookFlightScreenState extends State<BookFlightScreen> {
   Future<void> _saveBooking() async {
     if (!_formKey.currentState!.validate()) return;
 
+    // Show loading indicator
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) => const Center(child: CircularProgressIndicator()),
+    );
+
     // Build booking map
     final booking = <String, dynamic>{
       'date': _flightDate != null
@@ -345,6 +354,7 @@ class _BookFlightScreenState extends State<BookFlightScreen> {
             newEnd != null &&
             bEtd.isBefore(newEnd) &&
             etd.isBefore(bEnd)) {
+          Navigator.of(context).pop(); // Remove loading
           await _showBookingError(
             'This aircraft is already booked during the selected time.',
           );
@@ -354,24 +364,28 @@ class _BookFlightScreenState extends State<BookFlightScreen> {
     }
     // 2. Landing after take-off
     if (etd != null && eta != null && eta.isBefore(etd)) {
+      Navigator.of(context).pop(); // Remove loading
       await _showBookingError('Landing time cannot be before take-off time.');
       return;
     }
     // 3. Circuit flight hourly slots
     if (type == 'CIRCUIT') {
       if (etd == null || eta == null) {
+        Navigator.of(context).pop(); // Remove loading
         await _showBookingError(
           'Please enter both ETD and ETA for circuit flights.',
         );
         return;
       }
       if (etd.minute != 0 || eta.minute != 0) {
+        Navigator.of(context).pop(); // Remove loading
         await _showBookingError(
           'Circuit flights must start and end exactly on the hour (e.g., 10:00–11:00).',
         );
         return;
       }
       if (eta.difference(etd).inMinutes != 60) {
+        Navigator.of(context).pop(); // Remove loading
         await _showBookingError(
           'Circuit flights must be exactly 1 hour in duration (e.g., 10:00–11:00).',
         );
@@ -394,6 +408,7 @@ class _BookFlightScreenState extends State<BookFlightScreen> {
         } catch (_) {}
       }
       if (concurrent >= 3) {
+        Navigator.of(context).pop(); // Remove loading
         await _showBookingError(
           'Maximum of 3 aircraft can be booked for circuits in the same hour.',
         );
@@ -407,6 +422,7 @@ class _BookFlightScreenState extends State<BookFlightScreen> {
         _returnDate != null &&
         _returnEtaController.text.isNotEmpty) {
       bookings.add(jsonEncode(booking));
+      await sendBookingToAPI(booking, context: context);
       // Return leg as a separate booking (swap departure/destination, use return date/eta/pob)
       final returnBooking = Map<String, dynamic>.from(booking);
       returnBooking['date'] = booking['returnDate'];
@@ -419,9 +435,12 @@ class _BookFlightScreenState extends State<BookFlightScreen> {
       bookings.add(jsonEncode(returnBooking));
     } else {
       bookings.add(jsonEncode(booking));
+      await sendBookingToAPI(booking, context: context);
     }
 
     await prefs.setStringList('flightBookings', bookings);
+
+    Navigator.of(context).pop(); // Remove loading
 
     if (mounted) {
       ScaffoldMessenger.of(
@@ -828,7 +847,92 @@ class _BookFlightScreenState extends State<BookFlightScreen> {
     );
   }
 }
+Future<void> sendBookingToAPI(Map<String, dynamic> booking, {BuildContext? context}) async {
+  const baseUrl = "https://skycommand-api.onrender.com";
 
+  DateTime parseDateTime(String date, String time) {
+    final dateParts = date.split('/');
+    final day = int.parse(dateParts[0]);
+    final month = int.parse(dateParts[1]);
+    final year = int.parse(dateParts[2]);
+
+    final cleanTime = time.padLeft(4, '0');
+    final hour = int.parse(cleanTime.substring(0, 2));
+    final minute = int.parse(cleanTime.substring(2, 4));
+
+    return DateTime(year, month, day, hour, minute);
+  }
+
+  Future<void> trySubmit() async {
+    try {
+      final departure = parseDateTime(
+        booking["date"],
+        booking["etd"],
+      );
+
+      final arrival = (booking["eta"] != null && booking["eta"].toString().isNotEmpty)
+          ? parseDateTime(booking["date"], booking["eta"])
+          : departure.add(const Duration(hours: 1));
+
+      final response = await http.post(
+        Uri.parse("$baseUrl/api/flight-bookings"),
+        headers: {"Content-Type": "application/json"},
+        body: jsonEncode({
+          "pilotId": "P001",
+          "aircraftId": booking["aircraft"],
+          "departureAirport": booking["departure"],
+          "arrivalAirport": (booking["destination"] == null || booking["destination"].toString().trim().isEmpty)
+              ? booking["departure"]
+              : booking["destination"],
+          "plannedDepartureTime": departure.toUtc().toIso8601String(),
+          "plannedArrivalTime": arrival.toUtc().toIso8601String(),
+          "passengers": int.tryParse(booking["pob"] ?? "0") ?? 0,
+          "remarks": booking["typeOfFlight"] ?? "",
+        }),
+      );
+
+      if (response.statusCode != 200 && response.statusCode != 201) {
+        if (context != null) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('Failed to submit booking to server. (${response.statusCode})'),
+              action: SnackBarAction(
+                label: 'Retry',
+                onPressed: () {
+                  trySubmit();
+                },
+              ),
+            ),
+          );
+        }
+        throw Exception('Failed to submit booking: \\${response.body}');
+      }
+      // Optionally, show success feedback
+      if (context != null) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Booking sent to server!')),
+        );
+      }
+      print("API RESPONSE: "+response.body);
+    } catch (e) {
+      if (context != null) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Error sending booking: $e'),
+            action: SnackBarAction(
+              label: 'Retry',
+              onPressed: () {
+                trySubmit();
+              },
+            ),
+          ),
+        );
+      }
+      print("API ERROR: $e");
+    }
+  }
+  await trySubmit();
+}
 class UpperCaseTextFormatter extends TextInputFormatter {
   @override
   TextEditingValue formatEditUpdate(

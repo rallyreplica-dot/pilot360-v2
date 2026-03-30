@@ -1,7 +1,7 @@
-
 import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'booking_api_service.dart';
 import 'package:syncfusion_flutter_calendar/calendar.dart';
 
 // Booking event model for calendar
@@ -13,7 +13,6 @@ class _BookingEvent {
   _BookingEvent({required this.start, required this.end, required this.raw});
 }
 
-
 class CalendarBookingsPage extends StatefulWidget {
   const CalendarBookingsPage({super.key});
 
@@ -22,15 +21,9 @@ class CalendarBookingsPage extends StatefulWidget {
 }
 
 class _CalendarBookingsPageState extends State<CalendarBookingsPage> {
-    Future<void> clearAllBookings() async {
-      final prefs = await SharedPreferences.getInstance();
-      await prefs.remove('flightBookings');
-      setState(() {
-        events = [];
-      });
-    }
   bool isLoading = true;
   List<_BookingEvent> events = [];
+  bool useApi = true; // Toggle for API/local
 
   @override
   void initState() {
@@ -38,83 +31,120 @@ class _CalendarBookingsPageState extends State<CalendarBookingsPage> {
     loadBookings();
   }
 
+  Future<void> clearAllBookings() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove('flightBookings');
+    setState(() {
+      events = [];
+    });
+  }
+
   Future<void> loadBookings() async {
     setState(() => isLoading = true);
-    final prefs = await SharedPreferences.getInstance();
-    final bookings = prefs.getStringList('flightBookings') ?? [];
-    // Parse bookings into _BookingEvent list
-    final List<_BookingEvent> loadedEvents = [];
-    for (final raw in bookings) {
+    if (useApi) {
       try {
-        final Map<String, dynamic> bookingMap = jsonDecode(raw);
-        final type = (bookingMap['typeOfFlight'] ?? '').toString().toUpperCase();
-        final dateStr = bookingMap['date'] ?? '';
-        final etdStr = bookingMap['etd'] ?? '';
-        int parseYear(String y) {
-          if (y.length == 2) return 2000 + int.parse(y);
-          if (y.length == 4) return int.parse(y);
-          throw FormatException('Year must be 2 or 4 digits');
+        final apiBookings = await BookingApiService.fetchBookings();
+        final List<_BookingEvent> loadedEvents = [];
+        for (final bookingMap in apiBookings) {
+          try {
+            final dateStr = bookingMap['plannedDepartureTime'] ?? '';
+            final arrivalStr = bookingMap['plannedArrivalTime'] ?? '';
+            final start = DateTime.tryParse(dateStr);
+            final end = DateTime.tryParse(arrivalStr);
+            if (start != null && end != null) {
+              loadedEvents.add(_BookingEvent(
+                start: start,
+                end: end,
+                raw: jsonEncode(bookingMap),
+              ));
+            }
+          } catch (_) {}
         }
-        List<int>? parseDMY(String dateStr) {
-          final parts = dateStr.split('/');
-          if (parts.length != 3) return null;
-          final day = int.parse(parts[0]);
-          final month = int.parse(parts[1]);
-          final year = parseYear(parts[2]);
-          return [day, month, year];
+        setState(() {
+          events = loadedEvents;
+          isLoading = false;
+        });
+      } catch (e) {
+        setState(() {
+          isLoading = false;
+        });
+        debugPrint('API fetch error: $e');
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('Could not load bookings from the server. Please check your connection and try again.'),
+              backgroundColor: Colors.red,
+            ),
+          );
         }
-        List<int> parseTime(String timeStr) {
-          timeStr = timeStr.trim();
-          if (timeStr.contains(':')) {
-            final parts = timeStr.split(':');
-            final hour = int.parse(parts[0]);
-            final minute = parts.length > 1 ? int.parse(parts[1]) : 0;
-            return [hour, minute];
-          } else if (timeStr.length == 4) {
-            return [int.parse(timeStr.substring(0, 2)), int.parse(timeStr.substring(2, 4))];
-          } else if (timeStr.length == 3) {
-            return [int.parse(timeStr.substring(0, 1)), int.parse(timeStr.substring(1, 3))];
-          } else if (timeStr.length == 2) {
-            return [int.parse(timeStr), 0];
-          } else if (timeStr.length == 1) {
-            return [int.parse(timeStr), 0];
-          } else {
-            return [0, 0];
+      }
+    } else {
+      final prefs = await SharedPreferences.getInstance();
+      final bookings = prefs.getStringList('flightBookings') ?? [];
+      final List<_BookingEvent> loadedEvents = [];
+      for (final raw in bookings) {
+        try {
+          final Map<String, dynamic> bookingMap = jsonDecode(raw);
+          final type = (bookingMap['typeOfFlight'] ?? '').toString().toUpperCase();
+          final dateStr = bookingMap['date'] ?? '';
+          final etdStr = bookingMap['etd'] ?? '';
+          int parseYear(String y) {
+            if (y.length == 2) return 2000 + int.parse(y);
+            if (y.length == 4) return int.parse(y);
+            throw FormatException('Year must be 2 or 4 digits');
           }
-        }
-        if (dateStr.isNotEmpty && etdStr.isNotEmpty) {
-          final dmy = parseDMY(dateStr);
-          if (dmy != null) {
-            final day = dmy[0], month = dmy[1], year = dmy[2];
-            final etdParts = parseTime(etdStr);
-            final start = DateTime(year, month, day, etdParts[0], etdParts[1]);
-            final end = start.add(const Duration(hours: 1)); // Always single-day event
-            final isDuplicate = loadedEvents.any((e) => e.start == start && e.end == end && e.raw == raw);
-            if (!isDuplicate) {
-              loadedEvents.add(_BookingEvent(start: start, end: end, raw: raw));
+          List<int>? parseDMY(String dateStr) {
+            final parts = dateStr.split('/');
+            if (parts.length != 3) return null;
+            final day = int.parse(parts[0]);
+            final month = int.parse(parts[1]);
+            final year = parseYear(parts[2]);
+            return [day, month, year];
+          }
+          List<int> parseTime(String timeStr) {
+            timeStr = timeStr.trim();
+            if (timeStr.contains(':')) {
+              final parts = timeStr.split(':');
+              final hour = int.parse(parts[0]);
+              final minute = parts.length > 1 ? int.parse(parts[1]) : 0;
+              return [hour, minute];
+            } else if (timeStr.length == 4) {
+              return [int.parse(timeStr.substring(0, 2)), int.parse(timeStr.substring(2, 4))];
+            } else if (timeStr.length == 3) {
+              return [int.parse(timeStr.substring(0, 1)), int.parse(timeStr.substring(1, 3))];
+            } else if (timeStr.length == 2) {
+              return [int.parse(timeStr), 0];
+            } else if (timeStr.length == 1) {
+              return [int.parse(timeStr), 0];
+            } else {
+              return [0, 0];
             }
           }
-        }
-      } catch (_) {}
+          if (dateStr.isNotEmpty && etdStr.isNotEmpty) {
+            final dmy = parseDMY(dateStr);
+            if (dmy != null) {
+              final day = dmy[0], month = dmy[1], year = dmy[2];
+              final etdParts = parseTime(etdStr);
+              final start = DateTime(year, month, day, etdParts[0], etdParts[1]);
+              final end = start.add(const Duration(hours: 1));
+              final isDuplicate = loadedEvents.any((e) => e.start == start && e.end == end && e.raw == raw);
+              if (!isDuplicate) {
+                loadedEvents.add(_BookingEvent(start: start, end: end, raw: raw));
+              }
+            }
+          }
+        } catch (_) {}
+      }
+      setState(() {
+        events = loadedEvents;
+        isLoading = false;
+      });
     }
-    // Debug print: show all raw bookings and parsed events
-    debugPrint('Raw bookings from SharedPreferences:');
-    for (final raw in bookings) {
-      debugPrint(raw);
-    }
-    debugPrint('Parsed events:');
-    for (final event in loadedEvents) {
-      debugPrint('Event: start=${event.start}, end=${event.end}, raw=${event.raw}');
-    }
-    setState(() {
-      events = loadedEvents;
-      isLoading = false;
-    });
   }
 
   String _formatBookingTimeRange(DateTime start, DateTime end) {
     String formatTime(DateTime dt) =>
-      '${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}';
+      '${dt.toUtc().hour.toString().padLeft(2, '0')}:${dt.toUtc().minute.toString().padLeft(2, '0')} UTC';
     return '${formatTime(start)} - ${formatTime(end)}';
   }
 
@@ -129,7 +159,57 @@ class _CalendarBookingsPageState extends State<CalendarBookingsPage> {
         itemCount: dayEvents.length,
         itemBuilder: (context, index) {
           final event = dayEvents[index];
-          final bookingMap = Map<String, String>.from(jsonDecode(event.raw));
+          final Map<String, dynamic> bookingMap = jsonDecode(event.raw);
+          // Map API or local fields to user-friendly labels
+          final isApi = bookingMap.containsKey('plannedDepartureTime');
+          final details = <String, String>{};
+          String? status;
+          if (isApi) {
+            details['Aircraft'] = bookingMap['aircraftId'] ?? '';
+            details['Departure'] = bookingMap['departureAirport'] ?? '';
+            details['Arrival'] = bookingMap['arrivalAirport'] ?? '';
+            // Always display UTC for API times
+            details['Departure Time'] = bookingMap['plannedDepartureTime'] != null
+                ? DateTime.tryParse(bookingMap['plannedDepartureTime'])?.toUtc().toString().replaceFirst(' ', 'T').substring(0, 16).replaceFirst('T', ' ') + ' UTC'
+                : '';
+            details['Arrival Time'] = bookingMap['plannedArrivalTime'] != null
+                ? DateTime.tryParse(bookingMap['plannedArrivalTime'])?.toUtc().toString().replaceFirst(' ', 'T').substring(0, 16).replaceFirst('T', ' ') + ' UTC'
+                : '';
+            details['Passengers'] = bookingMap['passengers']?.toString() ?? '';
+            details['Remarks'] = bookingMap['remarks'] ?? '';
+            status = bookingMap['status'] ?? '';
+          } else {
+            // Local booking
+            _filteredBookingFields(Map<String, String>.from(bookingMap)).forEach((e) {
+              details[e.key] = e.value;
+            });
+          }
+          Color statusColor = Colors.grey;
+          IconData statusIcon = Icons.help_outline;
+          String statusLabel = '';
+          if (isApi && status != null) {
+            switch (status.toLowerCase()) {
+              case 'submitted':
+                statusColor = Colors.blue;
+                statusIcon = Icons.hourglass_top;
+                statusLabel = 'Submitted';
+                break;
+              case 'approved':
+                statusColor = Colors.green;
+                statusIcon = Icons.check_circle_outline;
+                statusLabel = 'Approved';
+                break;
+              case 'denied':
+                statusColor = Colors.red;
+                statusIcon = Icons.cancel_outlined;
+                statusLabel = 'Denied';
+                break;
+              default:
+                statusColor = Colors.grey;
+                statusIcon = Icons.help_outline;
+                statusLabel = status;
+            }
+          }
           return Padding(
             padding: const EdgeInsets.all(16.0),
             child: Column(
@@ -137,41 +217,59 @@ class _CalendarBookingsPageState extends State<CalendarBookingsPage> {
               children: [
                 Text('Booking details:', style: Theme.of(context).textTheme.titleLarge),
                 const SizedBox(height: 16),
-                ..._filteredBookingFields(bookingMap).map((e) => Text('${e.key}: ${e.value}')),
-                Padding(
-                  padding: const EdgeInsets.only(top: 24.0),
-                  child: ElevatedButton(
-                    onPressed: () async {
-                      final confirm = await showDialog<bool>(
-                        context: localContext,
-                        builder: (context) => AlertDialog(
-                          title: const Text('Cancel Booking'),
-                          content: const Text('Are you sure you want to cancel this booking?'),
-                          actions: [
-                            TextButton(
-                              onPressed: () => Navigator.of(context).pop(false),
-                              child: const Text('No'),
-                            ),
-                            TextButton(
-                              onPressed: () => Navigator.of(context).pop(true),
-                              child: const Text('Yes'),
-                            ),
-                          ],
+                if (isApi && status != null && status.isNotEmpty)
+                  Row(
+                    children: [
+                      Icon(statusIcon, color: statusColor),
+                      const SizedBox(width: 8),
+                      Text(
+                        statusLabel,
+                        style: TextStyle(
+                          color: statusColor,
+                          fontWeight: FontWeight.bold,
+                          fontSize: 16,
                         ),
-                      );
-                      if (confirm == true) {
-                        final prefs = await SharedPreferences.getInstance();
-                        final bookings = prefs.getStringList('flightBookings') ?? [];
-                        bookings.remove(event.raw);
-                        await prefs.setStringList('flightBookings', bookings);
-                        if (!mounted) return;
-                        Navigator.pop(localContext); // Close the dialog
-                        loadBookings();
-                      }
-                    },
-                    child: const Text('Delete'),
+                      ),
+                    ],
                   ),
-                ),
+                if (isApi && status != null && status.isNotEmpty)
+                  const SizedBox(height: 12),
+                ...details.entries.map((e) => Text('${e.key}: ${e.value}')),
+                if (!isApi) // Only allow delete for local bookings
+                  Padding(
+                    padding: const EdgeInsets.only(top: 24.0),
+                    child: ElevatedButton(
+                      onPressed: () async {
+                        final confirm = await showDialog<bool>(
+                          context: localContext,
+                          builder: (context) => AlertDialog(
+                            title: const Text('Cancel Booking'),
+                            content: const Text('Are you sure you want to cancel this booking?'),
+                            actions: [
+                              TextButton(
+                                onPressed: () => Navigator.of(context).pop(false),
+                                child: const Text('No'),
+                              ),
+                              TextButton(
+                                onPressed: () => Navigator.of(context).pop(true),
+                                child: const Text('Yes'),
+                              ),
+                            ],
+                          ),
+                        );
+                        if (confirm == true) {
+                          final prefs = await SharedPreferences.getInstance();
+                          final bookings = prefs.getStringList('flightBookings') ?? [];
+                          bookings.remove(event.raw);
+                          await prefs.setStringList('flightBookings', bookings);
+                          if (!mounted) return;
+                          Navigator.pop(localContext); // Close the dialog
+                          loadBookings();
+                        }
+                      },
+                      child: const Text('Delete'),
+                    ),
+                  ),
               ],
             ),
           );
@@ -200,9 +298,29 @@ class _CalendarBookingsPageState extends State<CalendarBookingsPage> {
 
   @override
   Widget build(BuildContext context) {
+    print('AppBar actions building!');
     return Scaffold(
       appBar: AppBar(
         title: const Text('Bookings Calendar'),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.refresh),
+            tooltip: 'Refresh',
+            onPressed: () {
+              loadBookings();
+            },
+          ),
+          IconButton(
+            icon: Icon(useApi ? Icons.cloud : Icons.storage),
+            tooltip: useApi ? 'Show Local Bookings' : 'Show API Bookings',
+            onPressed: () {
+              setState(() {
+                useApi = !useApi;
+              });
+              loadBookings();
+            },
+          ),
+        ],
       ),
       body: isLoading
           ? const Center(child: CircularProgressIndicator())
@@ -229,7 +347,6 @@ class _CalendarBookingsPageState extends State<CalendarBookingsPage> {
     );
   }
 }
-
 // DataSource for SfCalendar
 
 
@@ -309,11 +426,47 @@ class _BookingDataSource extends CalendarDataSource {
 
   @override
   String getSubject(int index) {
+    final _BookingEvent event = appointments![index];
+    final Map<String, dynamic> bookingMap = jsonDecode(event.raw);
+    // Show status for API bookings
+    if (bookingMap.containsKey('plannedDepartureTime')) {
+      final status = (bookingMap['status'] ?? '').toString().toLowerCase();
+      String statusLabel = '';
+      switch (status) {
+        case 'submitted':
+          statusLabel = ' (Submitted)';
+          break;
+        case 'approved':
+          statusLabel = ' (Approved)';
+          break;
+        case 'denied':
+          statusLabel = ' (Denied)';
+          break;
+        default:
+          statusLabel = status.isNotEmpty ? ' (${status[0].toUpperCase()}${status.substring(1)})' : '';
+      }
+      return 'Booking$statusLabel';
+    }
     return 'Booking';
   }
 
   @override
   Color getColor(int index) {
+    final _BookingEvent event = appointments![index];
+    final Map<String, dynamic> bookingMap = jsonDecode(event.raw);
+    if (bookingMap.containsKey('plannedDepartureTime')) {
+      final status = (bookingMap['status'] ?? '').toString().toLowerCase();
+      switch (status) {
+        case 'submitted':
+          return Colors.blue;
+        case 'approved':
+          return Colors.green;
+        case 'denied':
+          return Colors.red;
+        default:
+          return Colors.grey;
+      }
+    }
     return Colors.blueAccent;
   }
 

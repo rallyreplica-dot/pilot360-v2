@@ -33,7 +33,25 @@ class _BookingStatusWidgetState extends State<BookingStatusWidget> {
         if (booking != null) {
           setState(() {
             status = booking['status'];
-            flightTime = '${booking['date']} ${booking['time']}';
+            // Parse and display as UTC
+            try {
+              final dateParts = (booking['date'] ?? '').split('/');
+              final timeStr = booking['time'] ?? '';
+              if (dateParts.length == 3 && timeStr.length >= 3) {
+                final day = int.parse(dateParts[0]);
+                final month = int.parse(dateParts[1]);
+                final year = int.parse(dateParts[2]);
+                final hour = int.parse(timeStr.substring(0, 2));
+                final minute = int.parse(timeStr.substring(2));
+                final dt = DateTime(year, month, day, hour, minute).toUtc();
+                flightTime = '${dt.year.toString().padLeft(4, '0')}-${dt.month.toString().padLeft(2, '0')}-${dt.day.toString().padLeft(2, '0')} '
+                  '${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')} UTC';
+              } else {
+                flightTime = '${booking['date']} ${booking['time']} UTC';
+              }
+            } catch (_) {
+              flightTime = '${booking['date']} ${booking['time']} UTC';
+            }
             loading = false;
           });
         } else {
