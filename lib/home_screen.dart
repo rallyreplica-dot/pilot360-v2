@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'logo_widget.dart';
 import 'book_flight_screen.dart';
+import 'booking_status_widget.dart';
 
 import 'booked_flights_page.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -63,6 +64,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
   @override
   Widget build(BuildContext context) {
+    print('HOME: HomeScreen build called');
     return Scaffold(
       backgroundColor: const Color(0xFF4FC3F7),
       appBar: AppBar(
@@ -76,6 +78,7 @@ class _HomeScreenState extends State<HomeScreen> {
           children: [
             const Pilot360Logo(width: 300, height: 300),
             const SizedBox(height: 32),
+            // BookingStatusWidget removed for cleaner UI
             ElevatedButton.icon(
               icon: const Icon(Icons.flight_takeoff),
               label: const Text('Book a Flight'),
@@ -84,6 +87,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 textStyle: const TextStyle(fontSize: 18),
               ),
               onPressed: () {
+                print('HOME: Book a Flight button pressed');
                 Navigator.of(context).push(
                   MaterialPageRoute(
                     builder: (context) => BookFlightScreen(
@@ -103,6 +107,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 textStyle: const TextStyle(fontSize: 18),
               ),
               onPressed: () {
+                print('HOME: Booked Flights button pressed');
                 Navigator.of(context).push(
                   MaterialPageRoute(
                     builder: (context) => BookedFlightsPage(),
@@ -119,6 +124,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 textStyle: const TextStyle(fontSize: 18),
               ),
               onPressed: () {
+                print('HOME: Flight Log button pressed');
                 Navigator.of(context).pushNamed('/flight-log');
               },
             ),

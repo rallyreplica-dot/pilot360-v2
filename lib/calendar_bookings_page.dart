@@ -13,21 +13,30 @@ class _BookingEvent {
   _BookingEvent({required this.start, required this.end, required this.raw});
 }
 
+
 class CalendarBookingsPage extends StatefulWidget {
   const CalendarBookingsPage({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    print('CALENDAR: CalendarBookingsPage build called');
+    return Container(); // This is just to ensure the print fires if ever called directly
+  }
 
   @override
   State<CalendarBookingsPage> createState() => _CalendarBookingsPageState();
 }
 
 class _CalendarBookingsPageState extends State<CalendarBookingsPage> {
+  // Only one initState should exist. If another exists below, remove it.
   bool isLoading = true;
   List<_BookingEvent> events = [];
-  bool useApi = true; // Toggle for API/local
+  bool useApi = true; // Always use API mode by default
 
   @override
   void initState() {
     super.initState();
+    useApi = true; // Always use API mode on page open
     loadBookings();
   }
 
@@ -40,26 +49,81 @@ class _CalendarBookingsPageState extends State<CalendarBookingsPage> {
   }
 
   Future<void> loadBookings() async {
+    print('CALENDAR: loadBookings called, useApi: ' + useApi.toString());
     setState(() => isLoading = true);
     if (useApi) {
       try {
+        print('CALENDAR: About to fetch bookings from API');
         final apiBookings = await BookingApiService.fetchBookings();
+        print('CALENDAR: Fetched bookings from API: ' + apiBookings.toString());
         final List<_BookingEvent> loadedEvents = [];
+        int skipped = 0;
         for (final bookingMap in apiBookings) {
           try {
-            final dateStr = bookingMap['plannedDepartureTime'] ?? '';
-            final arrivalStr = bookingMap['plannedArrivalTime'] ?? '';
-            final start = DateTime.tryParse(dateStr);
-            final end = DateTime.tryParse(arrivalStr);
+            print('CALENDAR: Processing booking: $bookingMap');
+            if (bookingMap == null || bookingMap is! Map) {
+              print('CALENDAR: Skipping invalid booking entry: $bookingMap');
+              skipped++;
+              continue;
+            }
+            // Support both plannedDepartureTime/plannedArrivalTime and from/to/date fields
+            DateTime? start;
+            DateTime? end;
+            if (bookingMap.containsKey('plannedDepartureTime') && bookingMap.containsKey('plannedArrivalTime')) {
+              final dateStr = bookingMap['plannedDepartureTime'] ?? '';
+              final arrivalStr = bookingMap['plannedArrivalTime'] ?? '';
+              start = DateTime.tryParse(dateStr);
+              end = DateTime.tryParse(arrivalStr);
+              print('CALENDAR: Using plannedDepartureTime/plannedArrivalTime: $start - $end');
+            } else if (bookingMap.containsKey('date') && bookingMap.containsKey('from') && bookingMap.containsKey('to')) {
+              // Try to parse custom Node backend fields
+              final dateStr = bookingMap['date'] ?? '';
+              print('CALENDAR: Parsing Node backend date: $dateStr');
+              // Try to parse as ddmmyy or yyyymmdd
+              DateTime? parseDate(String s) {
+                if (s.length == 6) {
+                  // ddmmyy
+                  final day = int.tryParse(s.substring(0,2));
+                  final month = int.tryParse(s.substring(2,4));
+                  final year = int.tryParse(s.substring(4,6));
+                  if (day != null && month != null && year != null) {
+                    return DateTime(2000+year, month, day);
+                  }
+                } else if (s.length == 8) {
+                  // yyyymmdd
+                  final year = int.tryParse(s.substring(0,4));
+                  final month = int.tryParse(s.substring(4,6));
+                  final day = int.tryParse(s.substring(6,8));
+                  if (year != null && month != null && day != null) {
+                    return DateTime(year, month, day);
+                  }
+                }
+                return null;
+              }
+              final date = parseDate(dateStr);
+              print('CALENDAR: Parsed date: $date');
+              // Use default times if not present
+              start = date?.add(const Duration(hours: 9));
+              end = start?.add(const Duration(hours: 1));
+              print('CALENDAR: Using default times: $start - $end');
+            }
             if (start != null && end != null) {
               loadedEvents.add(_BookingEvent(
                 start: start,
                 end: end,
                 raw: jsonEncode(bookingMap),
               ));
+              print('CALENDAR: Added booking event: $start - $end');
+            } else {
+              print('CALENDAR: Skipping booking with invalid date/time: $bookingMap');
+              skipped++;
             }
-          } catch (_) {}
+          } catch (err) {
+            print('CALENDAR: Error parsing booking: $bookingMap\nError: $err');
+            skipped++;
+          }
         }
+        print('CALENDAR: Loaded ${loadedEvents.length} bookings, skipped $skipped invalid entries.');
         setState(() {
           events = loadedEvents;
           isLoading = false;
@@ -68,7 +132,7 @@ class _CalendarBookingsPageState extends State<CalendarBookingsPage> {
         setState(() {
           isLoading = false;
         });
-        debugPrint('API fetch error: $e');
+        debugPrint('CALENDAR: API fetch error: $e');
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(
@@ -165,18 +229,13 @@ class _CalendarBookingsPageState extends State<CalendarBookingsPage> {
           final details = <String, String>{};
           String? status;
           if (isApi) {
-            details['Aircraft'] = bookingMap['aircraftId'] ?? '';
-            details['Departure'] = bookingMap['departureAirport'] ?? '';
-            details['Arrival'] = bookingMap['arrivalAirport'] ?? '';
-            // Always display UTC for API times
-            details['Departure Time'] = bookingMap['plannedDepartureTime'] != null
-                ? DateTime.tryParse(bookingMap['plannedDepartureTime'])?.toUtc().toString().replaceFirst(' ', 'T').substring(0, 16).replaceFirst('T', ' ') + ' UTC'
-                : '';
-            details['Arrival Time'] = bookingMap['plannedArrivalTime'] != null
-                ? DateTime.tryParse(bookingMap['plannedArrivalTime'])?.toUtc().toString().replaceFirst(' ', 'T').substring(0, 16).replaceFirst('T', ' ') + ' UTC'
-                : '';
-            details['Passengers'] = bookingMap['passengers']?.toString() ?? '';
-            details['Remarks'] = bookingMap['remarks'] ?? '';
+            // Show all available fields for API bookings
+            details['Aircraft'] = bookingMap['aircraft'] ?? '';
+            details['Pilot'] = bookingMap['pilot'] ?? '';
+            details['Status'] = bookingMap['status'] ?? '';
+            details['Departure Time'] = bookingMap['plannedDepartureTime'] ?? '';
+            details['Arrival Time'] = bookingMap['plannedArrivalTime'] ?? '';
+            // Add any other fields you want to show here
             status = bookingMap['status'] ?? '';
           } else {
             // Local booking
@@ -310,16 +369,7 @@ class _CalendarBookingsPageState extends State<CalendarBookingsPage> {
               loadBookings();
             },
           ),
-          IconButton(
-            icon: Icon(useApi ? Icons.cloud : Icons.storage),
-            tooltip: useApi ? 'Show Local Bookings' : 'Show API Bookings',
-            onPressed: () {
-              setState(() {
-                useApi = !useApi;
-              });
-              loadBookings();
-            },
-          ),
+          // Hide the toggle button, always use API mode
         ],
       ),
       body: isLoading
@@ -428,24 +478,10 @@ class _BookingDataSource extends CalendarDataSource {
   String getSubject(int index) {
     final _BookingEvent event = appointments![index];
     final Map<String, dynamic> bookingMap = jsonDecode(event.raw);
-    // Show status for API bookings
+    // Show aircraft for API bookings
     if (bookingMap.containsKey('plannedDepartureTime')) {
-      final status = (bookingMap['status'] ?? '').toString().toLowerCase();
-      String statusLabel = '';
-      switch (status) {
-        case 'submitted':
-          statusLabel = ' (Submitted)';
-          break;
-        case 'approved':
-          statusLabel = ' (Approved)';
-          break;
-        case 'denied':
-          statusLabel = ' (Denied)';
-          break;
-        default:
-          statusLabel = status.isNotEmpty ? ' (${status[0].toUpperCase()}${status.substring(1)})' : '';
-      }
-      return 'Booking$statusLabel';
+      final aircraft = bookingMap['aircraft'] ?? '';
+      return aircraft.isNotEmpty ? aircraft : 'Booking';
     }
     return 'Booking';
   }

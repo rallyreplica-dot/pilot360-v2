@@ -21,7 +21,7 @@ class _BookingStatusWidgetState extends State<BookingStatusWidget> {
       loading = true;
       error = null;
     });
-    final url = Uri.parse('http://192.168.178.40:5000/bookings');
+    final url = Uri.parse('http://172.25.0.138:5000/bookings');
     try {
       final response = await http.get(url);
       if (response.statusCode == 200) {
@@ -35,17 +35,22 @@ class _BookingStatusWidgetState extends State<BookingStatusWidget> {
             status = booking['status'];
             // Parse and display as UTC
             try {
-              final dateParts = (booking['date'] ?? '').split('/');
+              final dateParts = (booking['date'] ?? '').split('-');
               final timeStr = booking['time'] ?? '';
-              if (dateParts.length == 3 && timeStr.length >= 3) {
-                final day = int.parse(dateParts[0]);
+              if (dateParts.length == 3 && timeStr.contains(':')) {
+                final year = int.parse(dateParts[0]);
                 final month = int.parse(dateParts[1]);
-                final year = int.parse(dateParts[2]);
-                final hour = int.parse(timeStr.substring(0, 2));
-                final minute = int.parse(timeStr.substring(2));
-                final dt = DateTime(year, month, day, hour, minute).toUtc();
-                flightTime = '${dt.year.toString().padLeft(4, '0')}-${dt.month.toString().padLeft(2, '0')}-${dt.day.toString().padLeft(2, '0')} '
-                  '${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')} UTC';
+                final day = int.parse(dateParts[2]);
+                final timeParts = timeStr.split(':');
+                if (timeParts.length == 2) {
+                  final hour = int.parse(timeParts[0]);
+                  final minute = int.parse(timeParts[1]);
+                  final dt = DateTime(year, month, day, hour, minute).toUtc();
+                  flightTime = '${dt.year.toString().padLeft(4, '0')}-${dt.month.toString().padLeft(2, '0')}-${dt.day.toString().padLeft(2, '0')} '
+                    '${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')} UTC';
+                } else {
+                  flightTime = '${booking['date']} ${booking['time']} UTC';
+                }
               } else {
                 flightTime = '${booking['date']} ${booking['time']} UTC';
               }

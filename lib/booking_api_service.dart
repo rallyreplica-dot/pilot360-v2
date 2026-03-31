@@ -2,7 +2,7 @@ import 'dart:convert';
 import 'package:http/http.dart' as http;
 
 class BookingApiService {
-  static const String baseUrl = 'https://skycommand-api.onrender.com';
+  static const String baseUrl = 'http://172.25.0.138:3000';
 
   static Future<List<Map<String, dynamic>>> fetchBookings() async {
     final response = await http.get(Uri.parse('$baseUrl/api/flight-bookings'));

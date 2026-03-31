@@ -29,6 +29,7 @@ class _BookedFlightsPageState extends State<BookedFlightsPage> {
 
   @override
   Widget build(BuildContext context) {
+    print('BOOKED FLIGHTS: BookedFlightsPage build called');
     return const CalendarBookingsPage();
   }
 }
