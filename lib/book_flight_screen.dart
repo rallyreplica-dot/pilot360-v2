@@ -20,7 +20,7 @@ class BookFlightScreen extends StatefulWidget {
 }
 
 class _BookFlightScreenState extends State<BookFlightScreen> {
-  final String baseUrl = "http://172.25.0.138:3000";
+  final String baseUrl = "https://skycommand-api-1.onrender.com";
   // Helper: Send email to tower for approval using Resend API
   Future<void> _sendApprovalEmail({
     required bool outOfHours,
@@ -848,7 +848,7 @@ class _BookFlightScreenState extends State<BookFlightScreen> {
   }
 }
 Future<void> sendBookingToAPI(Map<String, dynamic> booking, {BuildContext? context}) async {
-  const baseUrl = "http://172.25.0.138:3000";
+  const baseUrl = "https://skycommand-api-1.onrender.com";
 
   DateTime parseDateTime(String date, String time) {
     final dateParts = date.split('/');

@@ -117,9 +117,12 @@ class _RegisterScreenState extends State<RegisterScreen> {
                 displayStringForOption: (airfield) => airfield['name']?.toUpperCase() ?? '',
                 fieldViewBuilder: (context, controller, focusNode, onFieldSubmitted) {
                   // Only set the text if the user selected an option
-                  if (selectedAirfieldName != null) {
-                    controller.text = selectedAirfieldName!;
-                  }
+                  WidgetsBinding.instance.addPostFrameCallback((_) {
+                    if (selectedAirfieldName != null &&
+                        controller.text != selectedAirfieldName) {
+                      controller.text = selectedAirfieldName!;
+                    }
+                  });
                   return TextFormField(
                     controller: controller,
                     focusNode: focusNode,
