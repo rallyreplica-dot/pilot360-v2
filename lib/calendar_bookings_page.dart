@@ -59,7 +59,7 @@ class _CalendarBookingsPageState extends State<CalendarBookingsPage> {
     useApi = true; // Always use API mode on page open
     _loadBookingsAndPreserveSelection();
     // Start polling every 10 seconds
-    _pollingTimer = Timer.periodic(const Duration(seconds: 30), (timer) {
+    _pollingTimer = Timer.periodic(const Duration(seconds: 10), (timer) {
       _loadBookingsAndPreserveSelection();
     });
   }
@@ -87,42 +87,87 @@ class _CalendarBookingsPageState extends State<CalendarBookingsPage> {
       try {
         print('CALENDAR: About to fetch bookings from API');
         final apiBookings = await BookingApiService.fetchBookings();
-        print('CALENDAR: Fetched bookings from API: ' + apiBookings.toString());
+        print('RAW BOOKINGS FROM API:');
+        print(apiBookings);
+        print('BOOKINGS COUNT: ${apiBookings.length}');
         final List<_BookingEvent> loadedEvents = [];
         int skipped = 0;
         for (final bookingMap in apiBookings) {
           try {
-            print('CALENDAR: Processing booking: $bookingMap');
+            print('PROCESSING BOOKING: $bookingMap');
             if (bookingMap == null || bookingMap is! Map) {
               print('CALENDAR: Skipping invalid booking entry: $bookingMap');
               skipped++;
               continue;
             }
-            // Always use the 'date' field (DDMMYY) for event day, set time to 09:00 local for visibility
             DateTime? start;
             DateTime? end;
-            if (bookingMap.containsKey('date')) {
-              final dateStr = bookingMap['date'] ?? '';
-              if (dateStr.length == 6) {
-                final day = int.tryParse(dateStr.substring(0,2));
-                final month = int.tryParse(dateStr.substring(2,4));
-                final year = int.tryParse(dateStr.substring(4,6));
-                if (day != null && month != null && year != null) {
-                  start = DateTime(2000+year, month, day, 9, 0);
-                  end = start.add(const Duration(hours: 1));
-                  print('CALENDAR: Using date field for event: $start - $end');
-                }
+
+            // Helper: parse DDMMYY date string
+            DateTime? parseDDMMYY(String s) {
+              if (s.length == 6) {
+                final d = int.tryParse(s.substring(0, 2));
+                final m = int.tryParse(s.substring(2, 4));
+                final y = int.tryParse(s.substring(4, 6));
+                if (d != null && m != null && y != null) return DateTime(2000 + y, m, d);
+              }
+              return null;
+            }
+
+            // Helper: parse HHMM time string into hours and minutes
+            List<int>? parseHHMM(String s) {
+              s = s.trim();
+              if (s.isEmpty) return null;
+              s = s.padLeft(4, '0');
+              final h = int.tryParse(s.substring(0, 2));
+              final min = int.tryParse(s.substring(2, 4));
+              if (h != null && min != null) return [h, min];
+              return null;
+            }
+
+            // Try to get the date from 'date' field (DDMMYY) or 'plannedDepartureTime' (DDMMYY or ISO)
+            DateTime? baseDate;
+            final dateField = (bookingMap['date'] ?? '').toString();
+            final pdtField = (bookingMap['plannedDepartureTime'] ?? '').toString();
+            final patField = (bookingMap['plannedArrivalTime'] ?? '').toString();
+
+            baseDate = parseDDMMYY(dateField) ?? parseDDMMYY(pdtField);
+
+            // If etd/eta are available, use them for precise times
+            final etdStr = (bookingMap['etd'] ?? '').toString();
+            final etaStr = (bookingMap['eta'] ?? '').toString();
+            final etdParts = parseHHMM(etdStr);
+            final etaParts = parseHHMM(etaStr);
+
+            if (baseDate != null && etdParts != null) {
+              start = DateTime(baseDate.year, baseDate.month, baseDate.day, etdParts[0], etdParts[1]);
+              if (etaParts != null) {
+                end = DateTime(baseDate.year, baseDate.month, baseDate.day, etaParts[0], etaParts[1]);
+              } else {
+                end = start.add(const Duration(hours: 1));
+              }
+              print('CALENDAR: Using date+etd/eta for event: $start - $end');
+            } else if (baseDate != null) {
+              // Have date but no etd — default to 09:00
+              start = DateTime(baseDate.year, baseDate.month, baseDate.day, 9, 0);
+              end = start.add(const Duration(hours: 1));
+              print('CALENDAR: Using date field (no etd) for event: $start - $end');
+            }
+
+            // Fallback: try ISO 8601 plannedDepartureTime/plannedArrivalTime
+            if (start == null) {
+              final isoStart = DateTime.tryParse(pdtField)?.toLocal();
+              final isoEnd = DateTime.tryParse(patField)?.toLocal();
+              if (isoStart != null) {
+                start = isoStart;
+                end = isoEnd ?? isoStart.add(const Duration(hours: 1));
+                print('CALENDAR: Fallback to ISO plannedDepartureTime: $start - $end');
               }
             }
-            // Fallback: use plannedDepartureTime if 'date' is missing
-            if (start == null && bookingMap.containsKey('plannedDepartureTime') && bookingMap.containsKey('plannedArrivalTime')) {
-              final dateStr = bookingMap['plannedDepartureTime'] ?? '';
-              final arrivalStr = bookingMap['plannedArrivalTime'] ?? '';
-              start = DateTime.tryParse(dateStr)?.toLocal();
-              end = DateTime.tryParse(arrivalStr)?.toLocal();
-              print('CALENDAR: Fallback to plannedDepartureTime: $start - $end');
-            }
             if (start != null && end != null) {
+              print('ADDING EVENT FOR: ${bookingMap['aircraftId']}');
+              print('START: $start');
+              print('END: $end');
               loadedEvents.add(_BookingEvent(
                 start: start,
                 end: end,
@@ -139,6 +184,8 @@ class _CalendarBookingsPageState extends State<CalendarBookingsPage> {
             skipped++;
           }
         }
+        print('EVENTS COUNT: ${loadedEvents.length}');
+        print(loadedEvents);
         print('CALENDAR: Loaded ${loadedEvents.length} bookings, skipped $skipped invalid entries.');
         _BookingEvent? newSelectedBooking;
         if (prevSelectedBookingKey != null) {
@@ -147,7 +194,7 @@ class _CalendarBookingsPageState extends State<CalendarBookingsPage> {
         }
         if (!mounted) return;
         setState(() {
-          events = loadedEvents;
+          events = List<_BookingEvent>.from(loadedEvents);
           isLoading = false;
           _selectedDate = prevSelectedDate;
           _selectedBooking = newSelectedBooking;
@@ -251,180 +298,220 @@ class _CalendarBookingsPageState extends State<CalendarBookingsPage> {
   }
 
   void _showDayBookingsDialog(List<_BookingEvent> dayEvents) async {
-  final localContext = context;
-  if (!mounted || dayEvents.isEmpty) return;
+    final localContext = context;
+    if (!mounted || dayEvents.isEmpty) return;
 
-  await showModalBottomSheet(
-    context: localContext,
-    isScrollControlled: true,
-    builder: (context) {
-      return StatefulBuilder(
-        builder: (context, setModalState) {
-          _BookingEvent selectedEvent = _selectedBooking != null &&
-                  dayEvents.any((e) => e.bookingKey == _selectedBooking!.bookingKey)
-              ? dayEvents.firstWhere((e) => e.bookingKey == _selectedBooking!.bookingKey)
-              : dayEvents.first;
+    await showModalBottomSheet(
+      context: localContext,
+      isScrollControlled: true,
+      builder: (context) {
+        return StatefulBuilder(
+          builder: (context, setModalState) {
+            // Compute all details once for the selected event
+            _BookingEvent selectedEvent = _selectedBooking != null &&
+                    dayEvents.any((e) => e.bookingKey == _selectedBooking!.bookingKey)
+                ? dayEvents.firstWhere((e) => e.bookingKey == _selectedBooking!.bookingKey)
+                : dayEvents.first;
 
-          final Map<String, dynamic> bookingMap = jsonDecode(selectedEvent.raw);
-          print('BOOKING MAP IN SHEET: $bookingMap');
-          final isApi = bookingMap.containsKey('plannedDepartureTime');
+            final Map<String, dynamic> bookingMap = jsonDecode(selectedEvent.raw);
+            final isApi = bookingMap.containsKey('plannedDepartureTime');
+            final aircraft = isApi
+                ? (bookingMap['aircraftId']?.toString() ?? '')
+                : (bookingMap['aircraft'] ?? 'Booking');
+            final callsign = (bookingMap['callsign'] ?? '').toString();
+            final pilot = isApi
+                ? (bookingMap['pilotId']?.toString() ?? '')
+                : (bookingMap['pilot'] ?? 'Unknown');
+            final statusValue = (
+              bookingMap['status'] ??
+              bookingMap['bookingStatus'] ??
+              bookingMap['flightStatus'] ??
+              bookingMap['remarks']
+            )?.toString().trim() ?? '';
+            final departureTime = isApi
+                ? (bookingMap['plannedDepartureTime']?.toString() ?? '')
+                : (bookingMap['departureTime'] ?? '');
 
-          final aircraft = isApi
-              ? (bookingMap['aircraftId']?.toString() ?? '')
-              : (bookingMap['aircraft'] ?? '');
-          final pilot = isApi
-              ? (bookingMap['pilotId']?.toString() ?? '')
-              : (bookingMap['pilot'] ?? '');
-          final statusValue = (
-            bookingMap['status'] ??
-            bookingMap['bookingStatus'] ??
-            bookingMap['flightStatus'] ??
-            bookingMap['remarks']
-          )?.toString().trim() ?? '';
-          final departureTime = isApi
-              ? (bookingMap['plannedDepartureTime']?.toString() ?? '')
-              : (bookingMap['departureTime'] ?? '');
-          final arrivalTime = isApi
-              ? (bookingMap['plannedArrivalTime']?.toString() ?? '')
-              : (bookingMap['arrivalTime'] ?? '');
+            final arrivalTime = isApi
+                ? (bookingMap['plannedArrivalTime']?.toString() ?? '')
+                : (bookingMap['arrivalTime'] ?? '');
 
-          Color statusColor = Colors.grey;
-          IconData statusIcon = Icons.help_outline;
-          String statusLabel = statusValue.isNotEmpty ? statusValue : 'Unknown';
+            // If times are missing, use event start/end
+            String formatTime(DateTime dt) => '${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}';
+            final event = dayEvents.firstWhere(
+              (e) => e.bookingKey == selectedEvent.bookingKey,
+              orElse: () => selectedEvent,
+            );
+            final depTimeDisplay = (departureTime?.isNotEmpty == true)
+                ? departureTime
+                : formatTime(event.start);
+            final arrTimeDisplay = (arrivalTime?.isNotEmpty == true)
+                ? arrivalTime
+                : formatTime(event.end);
 
-          switch (statusValue.toLowerCase()) {
-            case 'submitted':
-              statusColor = Colors.blue;
-              statusIcon = Icons.hourglass_top;
-              statusLabel = 'Submitted';
-              break;
-            case 'approved':
-              statusColor = Colors.green;
-              statusIcon = Icons.check_circle_outline;
-              statusLabel = 'Approved';
-              break;
-            case 'denied':
-              statusColor = Colors.red;
-              statusIcon = Icons.cancel_outlined;
-              statusLabel = 'Denied';
-              break;
-          }
+            Color statusColor = Colors.grey;
+            IconData statusIcon = Icons.help_outline;
+            String statusLabel = statusValue.isNotEmpty ? statusValue : 'Unknown';
 
-          return Padding(
-            padding: const EdgeInsets.all(16.0),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text('Booking details:', style: Theme.of(context).textTheme.titleLarge),
-                const SizedBox(height: 12),
+            switch (statusValue.toLowerCase()) {
+              case 'submitted':
+                statusColor = Colors.blue;
+                statusIcon = Icons.hourglass_top;
+                statusLabel = 'Submitted';
+                break;
+              case 'approved':
+                statusColor = Colors.green;
+                statusIcon = Icons.check_circle_outline;
+                statusLabel = 'Approved';
+                break;
+              case 'denied':
+                statusColor = Colors.red;
+                statusIcon = Icons.cancel_outlined;
+                statusLabel = 'Denied';
+                break;
+            }
 
-                if (dayEvents.length > 1) ...[
-                  const Text(
-                    'Bookings on this day',
-                    style: TextStyle(fontWeight: FontWeight.bold),
-                  ),
-                  const SizedBox(height: 8),
-                  SizedBox(
-                    height: 140,
-                    child: ListView.builder(
-                      itemCount: dayEvents.length,
-                      itemBuilder: (context, index) {
-                        final item = dayEvents[index];
-                        final itemMap = jsonDecode(item.raw) as Map<String, dynamic>;
-                        final itemAircraft = itemMap['aircraftId']?.toString() ??
-                            itemMap['aircraft']?.toString() ??
-                            'Booking';
-                        final itemStatus =
-                            itemMap['status']?.toString().trim().isNotEmpty == true
-                                ? itemMap['status'].toString()
-                                : 'Unknown';
-
-                        return ListTile(
-                          dense: true,
-                          selected: item.bookingKey == selectedEvent.bookingKey,
-                          title: Text(itemAircraft),
-                          subtitle: Text(
-                            '${_formatBookingTimeRange(item.start, item.end)} • $itemStatus',
-                          ),
-                          onTap: () {
-                            setState(() {
-                              _selectedBooking = item;
-                            });
-                            setModalState(() {});
-                          },
-                        );
-                      },
-                    ),
-                  ),
-                  const Divider(),
-                ],
-
-                Row(
-                  children: [
-                    Icon(statusIcon, color: statusColor),
-                    const SizedBox(width: 8),
-                    Text(
-                      statusLabel,
-                      style: TextStyle(
-                        color: statusColor,
-                        fontWeight: FontWeight.bold,
-                        fontSize: 16,
-                      ),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 12),
-                Text('Aircraft: $aircraft'),
-                Text('Pilot: $pilot'),
-                Text('Status: $statusLabel'),
-                Text('Departure Time: $departureTime'),
-                Text('Arrival Time: $arrivalTime'),
-
-                if (!isApi)
-                  Padding(
-                    padding: const EdgeInsets.only(top: 24.0),
-                    child: ElevatedButton(
-                      onPressed: () async {
-                        final confirm = await showDialog<bool>(
-                          context: localContext,
-                          builder: (context) => AlertDialog(
-                            title: const Text('Cancel Booking'),
-                            content: const Text('Are you sure you want to cancel this booking?'),
-                            actions: [
-                              TextButton(
-                                onPressed: () => Navigator.of(context).pop(false),
-                                child: const Text('No'),
+            return Padding(
+              padding: const EdgeInsets.all(16.0),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Expanded(
+                    child: SingleChildScrollView(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text('Booking details:', style: Theme.of(context).textTheme.titleLarge),
+                          const SizedBox(height: 12),
+                          if (dayEvents.length > 1) ...[
+                            const Text(
+                              'Bookings on this day',
+                              style: TextStyle(fontWeight: FontWeight.bold),
+                            ),
+                            const SizedBox(height: 8),
+                            SizedBox(
+                              height: 140,
+                              child: ListView.builder(
+                                itemCount: dayEvents.length,
+                                itemBuilder: (context, index) {
+                                  final item = dayEvents[index];
+                                  final itemMap = jsonDecode(item.raw) as Map<String, dynamic>;
+                                  final itemAircraft = itemMap['aircraftId']?.toString() ??
+                                      itemMap['aircraft']?.toString() ??
+                                      'Booking';
+                                  final itemStatus =
+                                      itemMap['status']?.toString().trim().isNotEmpty == true
+                                          ? itemMap['status'].toString()
+                                          : 'Unknown';
+                                  final itemPilot = itemMap['pilotId']?.toString() ?? itemMap['pilot']?.toString() ?? '';
+                                  String formatTime(DateTime dt) => '${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}';
+                                  return ListTile(
+                                    dense: true,
+                                    selected: item.bookingKey == selectedEvent.bookingKey,
+                                    title: Text(itemAircraft),
+                                    subtitle: Text(
+                                      '${formatTime(item.start)}-${formatTime(item.end)} • $itemStatus${itemPilot.isNotEmpty ? ' • $itemPilot' : ''}',
+                                    ),
+                                    onTap: () {
+                                      _selectedBooking = item;
+                                      setModalState(() {});
+                                    },
+                                  );
+                                },
                               ),
-                              TextButton(
-                                onPressed: () => Navigator.of(context).pop(true),
-                                child: const Text('Yes'),
+                            ),
+                            const Divider(),
+                          ],
+                          Row(
+                            children: [
+                              Icon(statusIcon, color: statusColor),
+                              const SizedBox(width: 8),
+                              Text(
+                                statusLabel,
+                                style: TextStyle(
+                                  color: statusColor,
+                                  fontWeight: FontWeight.bold,
+                                  fontSize: 16,
+                                ),
                               ),
                             ],
                           ),
-                        );
-
-                        if (confirm == true) {
-                          final prefs = await SharedPreferences.getInstance();
-                          final bookings = prefs.getStringList('flightBookings') ?? [];
-                          bookings.remove(selectedEvent.raw);
-                          await prefs.setStringList('flightBookings', bookings);
-                          if (!mounted) return;
-                          Navigator.pop(localContext);
-                          _loadBookingsAndPreserveSelection();
-                        }
-                      },
-                      child: const Text('Delete'),
+                          const SizedBox(height: 12),
+                          Text('Aircraft: $aircraft'),
+                          if (callsign.isNotEmpty) Text('Callsign: $callsign'),
+                          if (pilot.isNotEmpty) Text('Pilot: $pilot'),
+                          Text('Status: $statusLabel'),
+                          Text('Departure Time: $depTimeDisplay'),
+                          Text('Arrival Time: $arrTimeDisplay'),
+                        ],
+                      ),
                     ),
                   ),
-              ],
-            ),
-          );
-        },
-      );
-    },
-  );
-}
+                  Padding(
+                    padding: const EdgeInsets.only(top: 24.0, bottom: 8.0),
+                    child: SizedBox(
+                      width: double.infinity,
+                      child: ElevatedButton(
+                        style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
+                        onPressed: () async {
+                          final confirm = await showDialog<bool>(
+                            context: localContext,
+                            builder: (context) => AlertDialog(
+                              title: const Text('Cancel Booking'),
+                              content: const Text('Are you sure you want to cancel this booking?'),
+                              actions: [
+                                TextButton(
+                                  onPressed: () => Navigator.of(context).pop(false),
+                                  child: const Text('No'),
+                                ),
+                                TextButton(
+                                  onPressed: () => Navigator.of(context).pop(true),
+                                  child: const Text('Yes'),
+                                ),
+                              ],
+                            ),
+                          );
+                          if (confirm == true) {
+                            // Try API cancel if booking has an id
+                            final bookingId = bookingMap['id']?.toString();
+                            if (bookingId != null && bookingId.isNotEmpty) {
+                              final resp = await BookingApiService.updateBookingStatus(bookingId, 'cancelled');
+                              if (resp) {
+                                if (!mounted) return;
+                                Navigator.pop(localContext);
+                                _loadBookingsAndPreserveSelection();
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  const SnackBar(content: Text('Booking cancelled.')),
+                                );
+                                return;
+                              }
+                            }
+                            // Fallback: local delete for non-API bookings
+                            final prefs = await SharedPreferences.getInstance();
+                            final bookings = prefs.getStringList('flightBookings') ?? [];
+                            bookings.remove(selectedEvent.raw);
+                            await prefs.setStringList('flightBookings', bookings);
+                            if (!mounted) return;
+                            Navigator.pop(localContext);
+                            _loadBookingsAndPreserveSelection();
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              const SnackBar(content: Text('Booking cancelled locally.')),
+                            );
+                          }
+                        },
+                        child: const Text('Cancel Flight'),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            );
+          },
+        );
+      },
+    );
+  }
 
   // Helper to filter booking fields for display
   List<MapEntry<String, String>> _filteredBookingFields(Map<String, String> booking) {
@@ -475,7 +562,12 @@ class _CalendarBookingsPageState extends State<CalendarBookingsPage> {
                     event.start.year == selectedDate.year &&
                     event.start.month == selectedDate.month &&
                     event.start.day == selectedDate.day
-                  ).toList();
+                  ).toList()
+                    ..sort((a, b) => a.start.compareTo(b.start));
+
+                  print('SELECTED DAY: $selectedDate');
+                  print('VISIBLE EVENTS FOR DAY: ${bookingsForDay.length}');
+                  print(bookingsForDay);
 
                   setState(() {
                     _selectedDate = selectedDate;

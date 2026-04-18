@@ -8,6 +8,7 @@ import 'dart:convert';
 import 'package:http/http.dart' as http;
 
 import 'calendar_bookings_page.dart';
+import 'callsign_lookup.dart';
 import 'package:daylight/daylight.dart' as daylight;
 
 class BookFlightScreen extends StatefulWidget {
@@ -194,10 +195,13 @@ class _BookFlightScreenState extends State<BookFlightScreen> {
   DateTime? _returnDate;
   List<String> _airfieldNames = [];
   final List<Map<String, String>> _airfieldRecords = [];
+  final Map<String, String> _nameToIcao = {};
   final TextEditingController _destinationController = TextEditingController();
   final _formKey = GlobalKey<FormState>();
   String? _selectedAircraftReg;
   final TextEditingController _departureController = TextEditingController();
+  String? _savedCompanyCallsign;
+  bool _useCallsign = true; // checkbox state for callsign
   // Define normal operating hours
   final TimeOfDay _openingTime = const TimeOfDay(hour: 9, minute: 0);
   final TimeOfDay _closingTime = const TimeOfDay(hour: 17, minute: 0);
@@ -211,6 +215,7 @@ class _BookFlightScreenState extends State<BookFlightScreen> {
   @override
   void initState() {
     super.initState();
+    _loadSavedCallsign();
     if (widget.homeAirfield != null && widget.homeAirfield!.isNotEmpty) {
       _departureController.text = widget.homeAirfield!;
     }
@@ -231,21 +236,55 @@ class _BookFlightScreenState extends State<BookFlightScreen> {
     final data = await DefaultAssetBundle.of(
       context,
     ).loadString('assets/airports.csv');
-    final rows = Csv().decode(data).toList();
+    final rows = Csv().decode(data);
     if (rows.isNotEmpty) {
       final headers = rows.first.map((e) => e.toString()).toList();
       final nameIdx = headers.indexOf('name');
-      _airfieldNames = rows
-          .skip(1)
-          .where(
-            (row) =>
-                row.length > nameIdx &&
-                row[nameIdx].toString().trim().isNotEmpty,
-          )
-          .map((row) => row[nameIdx].toString().toUpperCase())
-          .toList();
+      final icaoIdx = headers.indexOf('icao_code');
+      _airfieldNames = [];
+      _nameToIcao.clear();
+      for (final row in rows.skip(1)) {
+        if (row.length <= nameIdx || row[nameIdx].toString().trim().isEmpty) continue;
+        final name = row[nameIdx].toString().toUpperCase();
+        _airfieldNames.add(name);
+        if (icaoIdx >= 0 && row.length > icaoIdx && row[icaoIdx].toString().trim().isNotEmpty) {
+          _nameToIcao[name] = row[icaoIdx].toString().trim().toUpperCase();
+        }
+      }
       _airfieldNames.sort();
       setState(() {});
+    }
+  }
+
+  String _resolveToIcao(String value) {
+    final upper = value.toUpperCase().trim();
+    // Already an ICAO code?
+    if (RegExp(r'^[A-Z]{4}$').hasMatch(upper) && !_nameToIcao.containsKey(upper)) {
+      return upper;
+    }
+    // Direct lookup
+    if (_nameToIcao.containsKey(upper)) return _nameToIcao[upper]!;
+    // Try stripping common suffixes
+    final stripped = upper.replaceAll(RegExp(r'\b(AIRFIELD|AIRPORT|AERODROME|HELIPORT)\b'), '').replaceAll(RegExp(r'\s+'), ' ').trim();
+    if (_nameToIcao.containsKey(stripped)) return _nameToIcao[stripped]!;
+    // Partial match
+    for (final entry in _nameToIcao.entries) {
+      if (entry.key.contains(stripped) || stripped.contains(entry.key)) {
+        return entry.value;
+      }
+    }
+    return upper;
+  }
+
+  Future<void> _loadSavedCallsign() async {
+    final prefs = await SharedPreferences.getInstance();
+    final saved = prefs.getString('companyCallsign') ?? '';
+    if (saved.isNotEmpty && mounted) {
+      setState(() {
+        _savedCompanyCallsign = saved.toUpperCase();
+        _callsignController.text = _savedCompanyCallsign!;
+        _useCallsign = true;
+      });
     }
   }
 
@@ -270,6 +309,7 @@ class _BookFlightScreenState extends State<BookFlightScreen> {
   }
 
   String? _selectedTypeOfFlight;
+  final TextEditingController _callsignController = TextEditingController();
   final TextEditingController _etdController = TextEditingController();
   final TextEditingController _etaController = TextEditingController();
   final TextEditingController _pobController = TextEditingController();
@@ -281,6 +321,7 @@ class _BookFlightScreenState extends State<BookFlightScreen> {
   @override
   void dispose() {
     _departureController.dispose();
+    _callsignController.dispose();
     _etdController.dispose();
     _etaController.dispose();
     _pobController.dispose();
@@ -315,6 +356,7 @@ class _BookFlightScreenState extends State<BookFlightScreen> {
           ? '${_flightDate!.day.toString().padLeft(2, '0')}/${_flightDate!.month.toString().padLeft(2, '0')}/${_flightDate!.year}'
           : '',
       'aircraft': _selectedAircraftReg ?? '',
+      'callsign': _callsignController.text,
       'departure': _departureController.text,
       'typeOfFlight': _selectedTypeOfFlight ?? '',
       'destination': _destinationController.text,
@@ -422,20 +464,22 @@ class _BookFlightScreenState extends State<BookFlightScreen> {
         _returnDate != null &&
         _returnEtaController.text.isNotEmpty) {
       bookings.add(jsonEncode(booking));
-      await sendBookingToAPI(booking, context: context);
+      await sendBookingToAPI(booking, context: context, nameToIcao: _nameToIcao);
       // Return leg as a separate booking (swap departure/destination, use return date/eta/pob)
       final returnBooking = Map<String, dynamic>.from(booking);
       returnBooking['date'] = booking['returnDate'];
-      returnBooking['etd'] = booking['returnEta'];
-      returnBooking['eta'] = '';
+      returnBooking['etd'] = '';
+      returnBooking['eta'] = booking['returnEta'];
       returnBooking['pob'] = booking['returnPob'];
       returnBooking['departure'] = booking['destination'];
       returnBooking['destination'] = booking['departure'];
-      returnBooking['typeOfFlight'] = 'RETURN';
+      returnBooking['typeOfFlight'] = 'LANDAWAY';
+      print('RETURN BOOKING DEBUG: etd=${returnBooking['etd']} eta=${returnBooking['eta']} returnEta=${booking['returnEta']}');
       bookings.add(jsonEncode(returnBooking));
+      await sendBookingToAPI(returnBooking, context: context, nameToIcao: _nameToIcao);
     } else {
       bookings.add(jsonEncode(booking));
-      await sendBookingToAPI(booking, context: context);
+      await sendBookingToAPI(booking, context: context, nameToIcao: _nameToIcao);
     }
 
     await prefs.setStringList('flightBookings', bookings);
@@ -501,31 +545,88 @@ class _BookFlightScreenState extends State<BookFlightScreen> {
                 ),
               ),
               const SizedBox(height: 16),
-              DropdownButtonFormField<String>(
-                initialValue: _selectedAircraftReg,
-                decoration: const InputDecoration(labelText: 'AIRCRAFT'),
-                items: (widget.aircraftList ?? [])
-                    .map((aircraft) => aircraft['registration']?.toUpperCase())
-                    .where((reg) => reg != null && reg.isNotEmpty)
-                    .toSet()
-                    .toList()
-                    .map(
-                      (reg) => DropdownMenuItem<String>(
-                        value: reg,
-                        child: Text(
-                          reg ?? '',
-                          style: const TextStyle(letterSpacing: 1.5),
+              if ((widget.aircraftList ?? []).isNotEmpty)
+                DropdownButtonFormField<String>(
+                  value: _selectedAircraftReg,
+                  decoration: const InputDecoration(labelText: 'AIRCRAFT'),
+                  items: (widget.aircraftList ?? [])
+                      .map((aircraft) => aircraft['registration']?.toUpperCase())
+                      .where((reg) => reg != null && reg.isNotEmpty)
+                      .toSet()
+                      .toList()
+                      .map(
+                        (reg) => DropdownMenuItem<String>(
+                          value: reg,
+                          child: Text(
+                            reg ?? '',
+                            style: const TextStyle(letterSpacing: 1.5),
+                          ),
                         ),
-                      ),
-                    )
-                    .toList(),
+                      )
+                      .toList(),
+                  onChanged: (value) {
+                    setState(() {
+                      _selectedAircraftReg = value;
+                    });
+                  },
+                  validator: (value) =>
+                      value == null || value.isEmpty ? 'SELECT AIRCRAFT' : null,
+                )
+              else
+                TextFormField(
+                  decoration: const InputDecoration(
+                    labelText: 'AIRCRAFT REGISTRATION',
+                    hintText: 'e.g. G-AWFJ',
+                  ),
+                  textCapitalization: TextCapitalization.characters,
+                  style: const TextStyle(letterSpacing: 1.5),
+                  inputFormatters: [UpperCaseTextFormatter()],
+                  onChanged: (value) {
+                    _selectedAircraftReg = value.toUpperCase();
+                  },
+                  validator: (value) =>
+                      value == null || value.trim().isEmpty ? 'ENTER AIRCRAFT REGISTRATION' : null,
+                ),
+              const SizedBox(height: 16),
+              if (_savedCompanyCallsign != null && _savedCompanyCallsign!.isNotEmpty) ...[
+                Row(
+                  children: [
+                    Checkbox(
+                      value: _useCallsign,
+                      onChanged: (value) {
+                        setState(() {
+                          _useCallsign = value ?? true;
+                          if (_useCallsign) {
+                            _callsignController.text = _savedCompanyCallsign!;
+                          } else {
+                            _callsignController.clear();
+                          }
+                        });
+                      },
+                    ),
+                    const Text('USE COMPANY CALLSIGN', style: TextStyle(fontWeight: FontWeight.bold)),
+                  ],
+                ),
+              ],
+              TextFormField(
+                controller: _callsignController,
+                enabled: !(_savedCompanyCallsign != null && _savedCompanyCallsign!.isNotEmpty && !_useCallsign),
+                decoration: InputDecoration(
+                  labelText: 'CALLSIGN',
+                  hintText: 'e.g. SPEEDBIRD123 or BAW123',
+                ),
+                textCapitalization: TextCapitalization.characters,
+                style: const TextStyle(letterSpacing: 1.5),
+                inputFormatters: [UpperCaseTextFormatter()],
                 onChanged: (value) {
-                  setState(() {
-                    _selectedAircraftReg = value;
-                  });
+                  final formatted = CallsignLookup.format(value);
+                  if (formatted != value.toUpperCase()) {
+                    _callsignController.value = TextEditingValue(
+                      text: formatted,
+                      selection: TextSelection.collapsed(offset: formatted.length),
+                    );
+                  }
                 },
-                validator: (value) =>
-                    value == null || value.isEmpty ? 'SELECT AIRCRAFT' : null,
               ),
               const SizedBox(height: 16),
               TextFormField(
@@ -847,47 +948,49 @@ class _BookFlightScreenState extends State<BookFlightScreen> {
     );
   }
 }
-Future<void> sendBookingToAPI(Map<String, dynamic> booking, {BuildContext? context}) async {
+Future<void> sendBookingToAPI(Map<String, dynamic> booking, {BuildContext? context, Map<String, String>? nameToIcao}) async {
   const baseUrl = "http://localhost:41000";
 
-  DateTime parseDateTime(String date, String time) {
-    final dateParts = date.split('/');
-    final day = int.parse(dateParts[0]);
-    final month = int.parse(dateParts[1]);
-    final year = int.parse(dateParts[2]);
-
-    final cleanTime = time.padLeft(4, '0');
-    final hour = int.parse(cleanTime.substring(0, 2));
-    final minute = int.parse(cleanTime.substring(2, 4));
-
-    return DateTime(year, month, day, hour, minute);
+  String resolveIcao(String value) {
+    final upper = value.toUpperCase().trim();
+    if (upper.isEmpty) return upper;
+    if (RegExp(r'^[A-Z]{4}$').hasMatch(upper) && (nameToIcao == null || !nameToIcao.containsKey(upper))) {
+      return upper;
+    }
+    if (nameToIcao != null && nameToIcao.containsKey(upper)) return nameToIcao[upper]!;
+    final stripped = upper.replaceAll(RegExp(r'\b(AIRFIELD|AIRPORT|AERODROME|HELIPORT)\b'), '').replaceAll(RegExp(r'\s+'), ' ').trim();
+    if (nameToIcao != null && nameToIcao.containsKey(stripped)) return nameToIcao[stripped]!;
+    if (nameToIcao != null) {
+      for (final entry in nameToIcao.entries) {
+        if (entry.key.contains(stripped) || stripped.contains(entry.key)) return entry.value;
+      }
+    }
+    return upper;
   }
 
   Future<void> trySubmit() async {
     try {
-      final departure = parseDateTime(
-        booking["date"],
-        booking["etd"],
-      );
-
-      final arrival = (booking["eta"] != null && booking["eta"].toString().isNotEmpty)
-          ? parseDateTime(booking["date"], booking["eta"])
-          : departure.add(const Duration(hours: 1));
+      final departure = booking["departure"]?.toString() ?? '';
+      final destination = (booking["destination"] == null || booking["destination"].toString().trim().isEmpty)
+          ? departure
+          : booking["destination"].toString();
+      final fromIcao = resolveIcao(departure);
+      final toIcao = resolveIcao(destination);
 
       final response = await http.post(
         Uri.parse("$baseUrl/api/flight-bookings"),
         headers: {"Content-Type": "application/json"},
         body: jsonEncode({
-          "pilotId": "P001",
-          "aircraftId": booking["aircraft"],
-          "departureAirport": booking["departure"],
-          "arrivalAirport": (booking["destination"] == null || booking["destination"].toString().trim().isEmpty)
-              ? booking["departure"]
-              : booking["destination"],
-          "plannedDepartureTime": departure.toUtc().toIso8601String(),
-          "plannedArrivalTime": arrival.toUtc().toIso8601String(),
-          "passengers": int.tryParse(booking["pob"] ?? "0") ?? 0,
-          "remarks": booking["typeOfFlight"] ?? "",
+          "aircraft": booking["aircraft"],
+          "callsign": booking["callsign"],
+          "departure": departure,
+          "arrival": destination,
+          "from": fromIcao,
+          "to": toIcao,
+          "pob": booking["pob"] ?? "0",
+          "type": booking["typeOfFlight"] ?? "",
+          "etd": booking["etd"],
+          "eta": booking["eta"],
         }),
       );
 
@@ -910,7 +1013,7 @@ Future<void> sendBookingToAPI(Map<String, dynamic> booking, {BuildContext? conte
       // Optionally, show success feedback
       if (context != null) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Booking sent to server!')),
+          const SnackBar(content: Text('Booking received')),
         );
       }
       print("API RESPONSE: "+response.body);

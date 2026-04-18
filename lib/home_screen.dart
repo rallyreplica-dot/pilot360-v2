@@ -54,7 +54,17 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Future<void> _loadHomeAirfieldFromPrefs() async {
     final prefs = await SharedPreferences.getInstance();
-    final ha = prefs.getString('homeAirfield');
+    var ha = prefs.getString('homeAirfield');
+    // Fix: CSV bug may have stored "no"/"yes" (scheduled_service) instead of ICAO
+    if (ha != null && (ha.toLowerCase() == 'no' || ha.toLowerCase() == 'yes')) {
+      ha = null;
+      // Try name-based fallback
+      final name = prefs.getString('homeAirfieldName')?.toUpperCase() ?? '';
+      if (name.contains('NORTH WEALD')) {
+        ha = 'EGSX';
+        await prefs.setString('homeAirfield', ha!);
+      }
+    }
     if (ha != null && ha.isNotEmpty) {
       setState(() {
         homeAirfield = ha;

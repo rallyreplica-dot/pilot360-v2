@@ -1,0 +1,41 @@
+# How to Save, Commit, and Reopen Your Project
+
+## 1. Save Your Work
+- In VS Code, press **Ctrl+S** in each open file, or go to File > Save All.
+
+## 2. Commit Your Work (with Git)
+1. Click the Source Control icon (left sidebar, looks like a branch).
+2. Click the **+** next to each file, or the **+** at the top to stage all.
+3. Type a short commit message (e.g., "WIP: backend fixes").
+4. Click the checkmark (✓) to commit.
+5. *(Optional)* Click the "…" then "Push" to upload to GitHub (if set up).
+
+## 3. Safely Close Your Project
+- Close VS Code (File > Exit or click the X).
+- If a server is running in a terminal, press **Ctrl+C** in the terminal to stop it.
+
+## 4. Reopen Your Project Next Time
+1. Open VS Code.
+2. Click “File” > “Open Folder…”
+3. Select `C:\pilot360` and click “Select Folder.”
+4. Open the terminal (Terminal > New Terminal).
+5. Start the backend server:
+   ```
+   cd skycommand-api
+   node server.js
+   ```
+   You should see: `SkyCommand API running on http://127.0.0.1:41000`
+6. (If needed) Start the Flutter frontend:
+   - Open a new terminal tab (+ in terminal panel)
+   - Run:
+     ```
+     flutter run -d chrome
+     ```
+
+## 5. Troubleshooting
+- If you see “port in use” errors, restart your computer or use Task Manager to end any “node.exe” processes.
+- If you see “module not found” errors, run `npm install` in the `skycommand-api` folder.
+
+---
+
+**Keep this file for reference!**

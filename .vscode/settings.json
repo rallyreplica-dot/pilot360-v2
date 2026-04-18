@@ -1,0 +1,4 @@
+{
+    // Set the default port for Live Server to 5501
+    "liveServer.settings.port": 5501
+}

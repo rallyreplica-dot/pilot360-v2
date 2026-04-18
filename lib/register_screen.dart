@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:csv/csv.dart';
 import 'logo_widget.dart';
 import 'home_screen.dart';
 import 'aircraft_database.dart';
@@ -19,23 +20,20 @@ class _RegisterScreenState extends State<RegisterScreen> {
     Future<void> loadAirfields() async {
       final localContext = context;
       final csvString = await DefaultAssetBundle.of(localContext).loadString('assets/airports.csv');
-      final lines = csvString.split('\n');
-      if (lines.length < 2) return;
-      final nameIdx = 3; // Column D (0-based)
-      final icaoIdx = 12; // Column M (0-based)
-      allAirfields = lines.skip(1)
-          .where((line) => line.trim().isNotEmpty)
-          .map((line) {
-            final fields = line.split(',');
-            if (fields.length > icaoIdx && fields[icaoIdx].trim().isNotEmpty) {
-              return {
-                'name': fields[nameIdx].trim(),
-                'icao': fields[icaoIdx].trim(),
-              };
-            }
-            return null;
+      final rows = Csv().decode(csvString);
+      if (rows.length < 2) return;
+      final headers = rows.first.map((e) => e.toString()).toList();
+      final nameIdx = headers.indexOf('name');
+      final icaoIdx = headers.indexOf('icao_code');
+      if (nameIdx < 0 || icaoIdx < 0) return;
+      allAirfields = rows.skip(1)
+          .where((row) => row.length > icaoIdx && row[icaoIdx].toString().trim().isNotEmpty)
+          .map((row) {
+            return {
+              'name': row[nameIdx].toString().trim(),
+              'icao': row[icaoIdx].toString().trim(),
+            };
           })
-          .whereType<Map<String, String>>()
           .toList();
       if (!mounted) return;
       setState(() {});
@@ -44,17 +42,21 @@ class _RegisterScreenState extends State<RegisterScreen> {
   final _formKey = GlobalKey<FormState>();
   String? userName;
   final TextEditingController nameController = TextEditingController();
+  final TextEditingController callsignController = TextEditingController();
   String? aircraftReg;
   String? aircraftType;
   List<Map<String, String?>> aircraftList = [];
   bool nameEntered = false;
+  bool isInstructor = false; // true = flying school instructor, false = private owner
 
   Future<void> setRegistrationComplete() async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setBool('registrationComplete', true);
     // Optionally store userName, aircraftList, homeAirfield for later use
     if (userName != null) await prefs.setString('userName', userName!);
-    await prefs.setString('homeAirfield', selectedAirfieldName ?? '');
+    await prefs.setString('companyCallsign', callsignController.text.trim());
+    await prefs.setString('homeAirfield', selectedAirfieldIcao ?? selectedAirfieldName ?? '');
+    await prefs.setString('homeAirfieldName', selectedAirfieldName ?? '');
     await prefs.setString('aircraftList', aircraftList.map((a) => a.toString()).join('|')); // crude serialization
   }
 
@@ -93,11 +95,49 @@ class _RegisterScreenState extends State<RegisterScreen> {
                   onSaved: (value) => userName = value,
                   validator: (value) => value == null || value.isEmpty ? 'Enter your name' : null,
                 ),
-              TextFormField(
-                decoration: const InputDecoration(labelText: 'Aircraft Registration'),
-                onSaved: (value) => aircraftReg = value,
-                validator: (value) => value == null || value.isEmpty ? 'Enter registration' : null,
-              ),
+              if (!nameEntered) ...[
+                const SizedBox(height: 16),
+                Row(
+                  children: [
+                    const Text('Role: ', style: TextStyle(fontWeight: FontWeight.bold)),
+                    ChoiceChip(
+                      label: const Text('Private Owner'),
+                      selected: !isInstructor,
+                      onSelected: (selected) {
+                        if (selected) setState(() => isInstructor = false);
+                      },
+                    ),
+                    const SizedBox(width: 8),
+                    ChoiceChip(
+                      label: const Text('Instructor'),
+                      selected: isInstructor,
+                      onSelected: (selected) {
+                        if (selected) setState(() => isInstructor = true);
+                      },
+                    ),
+                  ],
+                ),
+              ],
+              if (isInstructor && !nameEntered)
+                TextFormField(
+                  controller: callsignController,
+                  decoration: const InputDecoration(
+                    labelText: 'Company Callsign',
+                    hintText: 'e.g. SPEEDBIRD',
+                  ),
+                  textCapitalization: TextCapitalization.characters,
+                  validator: isInstructor
+                      ? (value) => value == null || value.trim().isEmpty ? 'Enter your company callsign' : null
+                      : null,
+                ),
+              if (!isInstructor)
+                TextFormField(
+                  decoration: const InputDecoration(labelText: 'Aircraft Registration'),
+                  onSaved: (value) => aircraftReg = value,
+                  validator: !isInstructor
+                      ? (value) => value == null || value.isEmpty ? 'Enter registration' : null
+                      : null,
+                ),
               const SizedBox(height: 16),
               // Airfield single-select autocomplete
               Autocomplete<Map<String, String>>(
@@ -149,6 +189,23 @@ class _RegisterScreenState extends State<RegisterScreen> {
                     final localContext = context;
                     if (_formKey.currentState!.validate()) {
                       _formKey.currentState!.save();
+
+                      if (isInstructor) {
+                        // Instructor: save callsign, skip aircraft, go to home
+                        if (!nameEntered) nameEntered = true;
+                        await setRegistrationComplete();
+                        Navigator.of(localContext).pushReplacement(
+                          MaterialPageRoute(
+                            builder: (context) => HomeScreen(
+                              aircraftList: [],
+                              homeAirfield: selectedAirfieldIcao ?? selectedAirfieldName,
+                            ),
+                          ),
+                        );
+                        return;
+                      }
+
+                      // Private owner: aircraft registration flow
                       aircraftType = await fetchAircraftType(aircraftReg ?? '');
                       if (aircraftType == null) {
                         showDialog(
@@ -197,7 +254,7 @@ class _RegisterScreenState extends State<RegisterScreen> {
                                   MaterialPageRoute(
                                     builder: (context) => HomeScreen(
                                       aircraftList: List<Map<String, String?>>.from(aircraftList),
-                                      homeAirfield: selectedAirfieldName,
+                                      homeAirfield: selectedAirfieldIcao ?? selectedAirfieldName,
                                     ),
                                   ),
                                 );
