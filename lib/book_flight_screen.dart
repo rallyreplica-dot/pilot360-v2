@@ -77,23 +77,18 @@ class _BookFlightScreenState extends State<BookFlightScreen> {
     return etd != null && eta != null && eta.isBefore(etd);
   }
 
-  // Helper: Parse date string (dd/mm/yyyy)
+  // Helper: Parse date string (DDMMYY only)
   List<int>? _parseDMY(String dateStr) {
-    final parts = dateStr.split('/');
-    if (parts.length != 3) return null;
-    int parseYear(String y) {
-      if (y.length == 2) return 2000 + int.parse(y);
-      if (y.length == 4) return int.parse(y);
-      throw FormatException('Year must be 2 or 4 digits');
-    }
-
-    final day = int.parse(parts[0]);
-    final month = int.parse(parts[1]);
-    final year = parseYear(parts[2]);
-    return [day, month, year];
+    if (dateStr.length != 6) return null;
+    final day = int.tryParse(dateStr.substring(0, 2));
+    final month = int.tryParse(dateStr.substring(2, 4));
+    final year = int.tryParse(dateStr.substring(4, 6));
+    if (day == null || month == null || year == null) return null;
+    // Assume 2000+ for YY
+    return [day, month, 2000 + year];
   }
 
-  // Helper: Get DateTime from date string and time string
+  // Helper: Get DateTime from DDMMYY date string and time string
   DateTime? _combineDateTime(String dateStr, String timeStr) {
     final dmy = _parseDMY(dateStr);
     final t = _parseTime(timeStr);
@@ -193,6 +188,7 @@ class _BookFlightScreenState extends State<BookFlightScreen> {
 
   DateTime? _flightDate;
   DateTime? _returnDate;
+  final TextEditingController _returnDateController = TextEditingController();
   List<String> _airfieldNames = [];
   final List<Map<String, String>> _airfieldRecords = [];
   final Map<String, String> _nameToIcao = {};
@@ -215,6 +211,7 @@ class _BookFlightScreenState extends State<BookFlightScreen> {
   @override
   void initState() {
     super.initState();
+    print('DEBUG: BookFlightScreen loaded (initState)');
     _loadSavedCallsign();
     if (widget.homeAirfield != null && widget.homeAirfield!.isNotEmpty) {
       _departureController.text = widget.homeAirfield!;
@@ -317,6 +314,7 @@ class _BookFlightScreenState extends State<BookFlightScreen> {
   final TextEditingController _returnEtdController = TextEditingController();
   final TextEditingController _returnEtaController = TextEditingController();
   final TextEditingController _returnPobController = TextEditingController();
+  final TextEditingController _returnDepartureController = TextEditingController();
 
   @override
   void dispose() {
@@ -329,6 +327,7 @@ class _BookFlightScreenState extends State<BookFlightScreen> {
     _returnEtdController.dispose();
     _returnEtaController.dispose();
     _returnPobController.dispose();
+    _returnDateController.dispose();
     super.dispose();
   }
 
@@ -350,11 +349,37 @@ class _BookFlightScreenState extends State<BookFlightScreen> {
       builder: (context) => const Center(child: CircularProgressIndicator()),
     );
 
-    // Build booking map
+    // --- DATE HANDLING: use picker only ---
+    String outboundDate = '';
+    if (_flightDate != null) {
+      final day = _flightDate!.day.toString().padLeft(2, '0');
+      final month = _flightDate!.month.toString().padLeft(2, '0');
+      final year = _flightDate!.year.toString().substring(2, 4);
+      outboundDate = '$day$month$year';
+    }
+    // For return, keep using picker logic (rarely manually edited)
+    DateTime? actualReturnDate = _returnDate;
+    if (_flightDate != null && _returnDate != null && _returnDate!.isAtSameMomentAs(_flightDate!)) {
+      final outboundEta = _parseTime(_etaController.text);
+      final returnEtd = _parseTime(_returnEtdController.text.isNotEmpty ? _returnEtdController.text : _returnEtaController.text);
+      if (outboundEta != null && returnEtd != null) {
+        final outboundEtaMinutes = outboundEta.hour * 60 + outboundEta.minute;
+        final returnEtdMinutes = returnEtd.hour * 60 + returnEtd.minute;
+        if (returnEtdMinutes < outboundEtaMinutes) {
+          actualReturnDate = _flightDate!.add(const Duration(days: 1));
+        }
+      }
+    }
+    String toDDMMYY(DateTime? d) {
+      if (d == null) return '';
+      final day = d.day.toString().padLeft(2, '0');
+      final month = d.month.toString().padLeft(2, '0');
+      final year = d.year.toString().substring(2, 4);
+      return '$day$month$year';
+    }
+    final returnDate = toDDMMYY(actualReturnDate);
     final booking = <String, dynamic>{
-      'date': _flightDate != null
-          ? '${_flightDate!.day.toString().padLeft(2, '0')}/${_flightDate!.month.toString().padLeft(2, '0')}/${_flightDate!.year}'
-          : '',
+      'date': outboundDate,
       'aircraft': _selectedAircraftReg ?? '',
       'callsign': _callsignController.text,
       'departure': _departureController.text,
@@ -363,11 +388,10 @@ class _BookFlightScreenState extends State<BookFlightScreen> {
       'etd': _etdController.text,
       'eta': _etaController.text,
       'pob': _pobController.text,
-      'returnDate': _returnDate != null
-          ? '${_returnDate!.day.toString().padLeft(2, '0')}/${_returnDate!.month.toString().padLeft(2, '0')}/${_returnDate!.year}'
-          : '',
+      'returnDate': returnDate,
       'returnEta': _returnEtaController.text,
       'returnPob': _returnPobController.text,
+      'returnDeparture': _returnDepartureController.text,
     };
 
     final prefs = await SharedPreferences.getInstance();
@@ -463,18 +487,35 @@ class _BookFlightScreenState extends State<BookFlightScreen> {
         _bookReturnFlight &&
         _returnDate != null &&
         _returnEtaController.text.isNotEmpty) {
+      // Outbound leg
       bookings.add(jsonEncode(booking));
       await sendBookingToAPI(booking, context: context, nameToIcao: _nameToIcao);
-      // Return leg as a separate booking (swap departure/destination, use return date/eta/pob)
-      final returnBooking = Map<String, dynamic>.from(booking);
-      returnBooking['date'] = booking['returnDate'];
-      returnBooking['etd'] = '';
-      returnBooking['eta'] = booking['returnEta'];
-      returnBooking['pob'] = booking['returnPob'];
-      returnBooking['departure'] = booking['destination'];
-      returnBooking['destination'] = booking['departure'];
-      returnBooking['typeOfFlight'] = 'LANDAWAY';
-      print('RETURN BOOKING DEBUG: etd=${returnBooking['etd']} eta=${returnBooking['eta']} returnEta=${booking['returnEta']}');
+
+      // Return leg as a separate booking (swap departure/destination, use selected return date from UI)
+      // Always use the correct return date for the return leg
+      print('DEBUG: _returnDate: ' + (_returnDate?.toIso8601String() ?? 'null'));
+      print('DEBUG: _returnDateController.text: ' + _returnDateController.text);
+      String returnDateStr = toDDMMYY(_returnDate);
+      if ((returnDateStr.isEmpty || returnDateStr == toDDMMYY(_flightDate)) && _returnDateController.text.isNotEmpty) {
+        // Try to parse from controller if _returnDate is not set
+        final txt = _returnDateController.text;
+        if (txt.length == 6) {
+          returnDateStr = txt;
+        }
+      }
+      print('DEBUG: Final returnDateStr for return leg: ' + returnDateStr);
+      final returnBooking = <String, dynamic>{
+        'date': returnDateStr, // <-- This is now always the return date
+        'aircraft': _selectedAircraftReg ?? '',
+        'callsign': _callsignController.text,
+        'typeOfFlight': 'LANDAWAY',
+        'departure': _returnDepartureController.text.isNotEmpty ? _returnDepartureController.text : _destinationController.text,
+        'destination': _departureController.text,
+        'etd': _returnEtdController.text.isNotEmpty ? _returnEtdController.text : _returnEtaController.text,
+        'eta': _returnEtaController.text,
+        'pob': _returnPobController.text,
+      };
+      print('DEBUG: Return booking object: ' + returnBooking.toString());
       bookings.add(jsonEncode(returnBooking));
       await sendBookingToAPI(returnBooking, context: context, nameToIcao: _nameToIcao);
     } else {
@@ -483,6 +524,17 @@ class _BookFlightScreenState extends State<BookFlightScreen> {
     }
 
     await prefs.setStringList('flightBookings', bookings);
+
+    // Debug: Print all saved bookings after update
+    print('DEBUG: All saved bookings after update:');
+    for (final raw in bookings) {
+      try {
+        final b = jsonDecode(raw);
+        print(b);
+      } catch (e) {
+        print('DEBUG: Failed to decode booking: $e');
+      }
+    }
 
     Navigator.of(context).pop(); // Remove loading
 
@@ -535,7 +587,7 @@ class _BookFlightScreenState extends State<BookFlightScreen> {
                     ),
                     controller: TextEditingController(
                       text: _flightDate != null
-                          ? '${_flightDate!.day.toString().padLeft(2, '0')}/${_flightDate!.month.toString().padLeft(2, '0')}/${_flightDate!.year}'
+                          ? '${_flightDate!.day.toString().padLeft(2, '0')}${_flightDate!.month.toString().padLeft(2, '0')}${_flightDate!.year.toString().substring(2, 4)}'
                           : '',
                     ),
                     validator: (value) =>
@@ -637,9 +689,12 @@ class _BookFlightScreenState extends State<BookFlightScreen> {
                 textCapitalization: TextCapitalization.characters,
                 style: const TextStyle(letterSpacing: 1.5),
                 inputFormatters: [UpperCaseTextFormatter()],
-                validator: (value) => value == null || value.isEmpty
-                    ? 'ENTER DEPARTURE AIRFIELD'
-                    : null,
+                validator: (value) {
+                  if (value == null || value.isEmpty) {
+                    return 'ENTER DEPARTURE AIRFIELD';
+                  }
+                  return null;
+                },
               ),
               const SizedBox(height: 16),
               DropdownButtonFormField<String>(
@@ -655,12 +710,40 @@ class _BookFlightScreenState extends State<BookFlightScreen> {
                     _selectedTypeOfFlight = value;
                   });
                 },
-                validator: (value) => value == null || value.isEmpty
-                    ? 'SELECT TYPE OF FLIGHT'
-                    : null,
+                validator: (value) {
+                  if (value == null || value.isEmpty) {
+                    return 'SELECT TYPE OF FLIGHT';
+                  }
+                  return null;
+                },
               ),
               const SizedBox(height: 16),
               if (_selectedTypeOfFlight == 'LANDAWAY') ...[
+                // ETD field
+                TextFormField(
+                  controller: _etdController,
+                  decoration: const InputDecoration(
+                    labelText: 'ETD',
+                  ),
+                  keyboardType: TextInputType.datetime,
+                  textCapitalization: TextCapitalization.characters,
+                  style: const TextStyle(letterSpacing: 1.5),
+                  inputFormatters: [UpperCaseTextFormatter()],
+                  onChanged: (value) {
+                    setState(() {});
+                  },
+                  validator: (value) {
+                    if (value == null || value.isEmpty) {
+                      return 'ENTER ETD';
+                    }
+                    if (_parseTime(value) == null) {
+                      return 'INVALID TIME FORMAT (HH:MM)';
+                    }
+                    return null;
+                  },
+                ),
+                const SizedBox(height: 16),
+                // Destination field
                 Autocomplete<String>(
                   optionsBuilder: (TextEditingValue textEditingValue) {
                     if (textEditingValue.text == '') {
@@ -674,102 +757,55 @@ class _BookFlightScreenState extends State<BookFlightScreen> {
                   },
                   fieldViewBuilder:
                       (context, controller, focusNode, onFieldSubmitted) {
-                        controller.text = _destinationController.text;
-                        return TextFormField(
-                          controller: controller,
-                          focusNode: focusNode,
-                          decoration: const InputDecoration(
-                            labelText: 'DESTINATION',
+                    _destinationController.text = controller.text;
+                    return TextFormField(
+                      controller: controller,
+                      focusNode: focusNode,
+                      decoration: const InputDecoration(
+                        labelText: 'DESTINATION',
+                      ),
+                      textCapitalization: TextCapitalization.characters,
+                      style: const TextStyle(letterSpacing: 1.5),
+                      inputFormatters: [UpperCaseTextFormatter()],
+                      onChanged: (value) {
+                        _destinationController.text = value.toUpperCase();
+                        controller.value = controller.value.copyWith(
+                          text: value.toUpperCase(),
+                          selection: TextSelection.collapsed(
+                            offset: value.length,
                           ),
-                          textCapitalization: TextCapitalization.characters,
-                          style: const TextStyle(letterSpacing: 1.5),
-                          inputFormatters: [UpperCaseTextFormatter()],
-                          onChanged: (value) {
-                            _destinationController.text = value.toUpperCase();
-                            controller.value = controller.value.copyWith(
-                              text: value.toUpperCase(),
-                              selection: TextSelection.collapsed(
-                                offset: value.length,
-                              ),
-                            );
-                          },
-                          validator: (value) => value == null || value.isEmpty
-                              ? 'ENTER DESTINATION'
-                              : null,
                         );
                       },
+                      validator: (value) {
+                        if (value == null || value.isEmpty) {
+                          return 'ENTER DESTINATION';
+                        }
+                        return null;
+                      },
+                    );
+                  },
                   onSelected: (String selection) {
                     _destinationController.text = selection;
                   },
                 ),
                 const SizedBox(height: 16),
-              ],
-              TextFormField(
-                controller: _etdController,
-                decoration: const InputDecoration(labelText: 'ETD'),
-                keyboardType: TextInputType.datetime,
-                textCapitalization: TextCapitalization.characters,
-                style: const TextStyle(letterSpacing: 1.5),
-                inputFormatters: [UpperCaseTextFormatter()],
-                onChanged: (value) {
-                  setState(() {});
-                },
-                validator: (value) {
-                  if (value == null || value.isEmpty) return 'ENTER ETD';
-                  if (_parseTime(value) == null) {
-                    return 'INVALID TIME FORMAT (HH:MM)';
-                  }
-                  return null;
-                },
-              ),
-              const SizedBox(height: 16),
-              if (_selectedTypeOfFlight != 'LANDAWAY') ...[
+                // Outward POB field (for Landaway)
                 TextFormField(
-                  controller: _etaController,
-                  decoration: const InputDecoration(labelText: 'ETA'),
-                  keyboardType: TextInputType.datetime,
+                  controller: _pobController,
+                  decoration: const InputDecoration(labelText: 'POB'),
+                  keyboardType: TextInputType.number,
                   textCapitalization: TextCapitalization.characters,
                   style: const TextStyle(letterSpacing: 1.5),
                   inputFormatters: [UpperCaseTextFormatter()],
-                  onChanged: (value) {
-                    final upper = value.toUpperCase();
-                    if (value != upper) {
-                      _etaController.value = _etaController.value.copyWith(
-                        text: upper,
-                        selection: TextSelection.collapsed(
-                          offset: upper.length,
-                        ),
-                      );
-                    }
-                    setState(() {});
-                  },
                   validator: (value) {
-                    if (_selectedTypeOfFlight != 'LANDAWAY' &&
-                        (value == null || value.isEmpty)) {
-                      return 'ENTER ETA';
-                    }
-                    if (value != null && value.isNotEmpty) {
-                      if (_parseTime(value) == null) {
-                        return 'INVALID TIME FORMAT (HH:MM)';
-                      }
+                    if (value == null || value.isEmpty) {
+                      return 'ENTER POB';
                     }
                     return null;
                   },
                 ),
                 const SizedBox(height: 16),
-              ],
-              TextFormField(
-                controller: _pobController,
-                decoration: const InputDecoration(labelText: 'POB'),
-                keyboardType: TextInputType.number,
-                textCapitalization: TextCapitalization.characters,
-                style: const TextStyle(letterSpacing: 1.5),
-                inputFormatters: [UpperCaseTextFormatter()],
-                validator: (value) =>
-                    value == null || value.isEmpty ? 'ENTER POB' : null,
-              ),
-              const SizedBox(height: 16),
-              if (_selectedTypeOfFlight == 'LANDAWAY') ...[
+                // Book Return Flight checkbox
                 Row(
                   children: [
                     Checkbox(
@@ -785,6 +821,7 @@ class _BookFlightScreenState extends State<BookFlightScreen> {
                 ),
                 if (_bookReturnFlight) ...[
                   const SizedBox(height: 16),
+                  // Return Date
                   GestureDetector(
                     onTap: () async {
                       final picked = await showDatePicker(
@@ -796,7 +833,12 @@ class _BookFlightScreenState extends State<BookFlightScreen> {
                       if (picked != null) {
                         setState(() {
                           _returnDate = picked;
+                          _returnDateController.text = '${picked.day.toString().padLeft(2, '0')}${picked.month.toString().padLeft(2, '0')}${picked.year.toString().substring(2, 4)}';
                         });
+                        print('DEBUG: User selected return date: ' + picked.toIso8601String());
+                        print('DEBUG: _returnDate after setState: ' + (_returnDate?.toIso8601String() ?? 'null'));
+                      } else {
+                        print('DEBUG: No return date picked. _returnDate: ' + (_returnDate?.toIso8601String() ?? 'null'));
                       }
                     },
                     child: AbsorbPointer(
@@ -805,18 +847,88 @@ class _BookFlightScreenState extends State<BookFlightScreen> {
                           labelText: 'RETURN DATE',
                           hintText: 'SELECT RETURN DATE',
                         ),
-                        controller: TextEditingController(
-                          text: _returnDate != null
-                              ? '${_returnDate!.day.toString().padLeft(2, '0')}/${_returnDate!.month.toString().padLeft(2, '0')}/${_returnDate!.year}'
-                              : '',
-                        ),
+                        controller: _returnDateController,
                         validator: (value) =>
-                            _returnDate == null ? 'SELECT RETURN DATE' : null,
+                            (_returnDate == null && (_returnDateController.text.isEmpty || _returnDateController.text.length != 6)) ? 'SELECT RETURN DATE' : null,
                         readOnly: true,
                       ),
                     ),
                   ),
                   const SizedBox(height: 16),
+                  // Return Departure Airfield
+                  Autocomplete<String>(
+                    optionsBuilder: (TextEditingValue textEditingValue) {
+                      if (textEditingValue.text == '') {
+                        return const Iterable<String>.empty();
+                      }
+                      return _airfieldNames.where((String option) {
+                        return option.contains(
+                          textEditingValue.text.toUpperCase(),
+                        );
+                      });
+                    },
+                    fieldViewBuilder:
+                        (context, controller, focusNode, onFieldSubmitted) {
+                      if (controller.text.isEmpty && _destinationController.text.isNotEmpty) {
+                        controller.text = _destinationController.text;
+                      }
+                      _returnDepartureController.text = controller.text;
+                      return TextFormField(
+                        controller: controller,
+                        focusNode: focusNode,
+                        decoration: const InputDecoration(
+                          labelText: 'RETURN DEPARTURE AIRFIELD',
+                        ),
+                        textCapitalization: TextCapitalization.characters,
+                        style: const TextStyle(letterSpacing: 1.5),
+                        inputFormatters: [UpperCaseTextFormatter()],
+                        onChanged: (value) {
+                          _returnDepartureController.text = value.toUpperCase();
+                          controller.value = controller.value.copyWith(
+                            text: value.toUpperCase(),
+                            selection: TextSelection.collapsed(
+                              offset: value.length,
+                            ),
+                          );
+                        },
+                        validator: (value) {
+                          if (value == null || value.isEmpty) {
+                            return 'ENTER RETURN DEPARTURE AIRFIELD';
+                          }
+                          return null;
+                        },
+                      );
+                    },
+                    onSelected: (String selection) {
+                      _returnDepartureController.text = selection;
+                    },
+                  ),
+                  const SizedBox(height: 16),
+                  // Return ETD
+                  TextFormField(
+                    controller: _returnEtdController,
+                    decoration: const InputDecoration(
+                      labelText: 'RETURN ETD',
+                    ),
+                    keyboardType: TextInputType.datetime,
+                    textCapitalization: TextCapitalization.characters,
+                    style: const TextStyle(letterSpacing: 1.5),
+                    inputFormatters: [UpperCaseTextFormatter()],
+                    onChanged: (value) {
+                      setState(() {});
+                    },
+                    validator: (value) {
+                      if (value == null || value.isEmpty) {
+                        return 'ENTER RETURN ETD';
+                      }
+                      if (_parseTime(value) == null) {
+                        return 'INVALID TIME FORMAT (HH:MM)';
+                      }
+                      return null;
+                    },
+                  ),
+                  const SizedBox(height: 16),
+                  // Return ETA
                   TextFormField(
                     controller: _returnEtaController,
                     decoration: const InputDecoration(
@@ -840,6 +952,7 @@ class _BookFlightScreenState extends State<BookFlightScreen> {
                     },
                   ),
                   const SizedBox(height: 16),
+                  // Return POB
                   TextFormField(
                     controller: _returnPobController,
                     decoration: const InputDecoration(labelText: 'RETURN POB'),
@@ -847,12 +960,81 @@ class _BookFlightScreenState extends State<BookFlightScreen> {
                     textCapitalization: TextCapitalization.characters,
                     style: const TextStyle(letterSpacing: 1.5),
                     inputFormatters: [UpperCaseTextFormatter()],
-                    validator: (value) => value == null || value.isEmpty
-                        ? 'ENTER RETURN POB'
-                        : null,
+                    validator: (value) {
+                      if (value == null || value.isEmpty) {
+                        return 'ENTER RETURN POB';
+                      }
+                      return null;
+                    },
                   ),
                   const SizedBox(height: 16),
                 ],
+              ],
+              if (_selectedTypeOfFlight == 'LOCAL' || _selectedTypeOfFlight == 'CIRCUIT') ...[
+                // ETD field
+                TextFormField(
+                  controller: _etdController,
+                  decoration: const InputDecoration(
+                    labelText: 'ETD',
+                  ),
+                  keyboardType: TextInputType.datetime,
+                  textCapitalization: TextCapitalization.characters,
+                  style: const TextStyle(letterSpacing: 1.5),
+                  inputFormatters: [UpperCaseTextFormatter()],
+                  onChanged: (value) {
+                    setState(() {});
+                  },
+                  validator: (value) {
+                    if (value == null || value.isEmpty) {
+                      return 'ENTER ETD';
+                    }
+                    if (_parseTime(value) == null) {
+                      return 'INVALID TIME FORMAT (HH:MM)';
+                    }
+                    return null;
+                  },
+                ),
+                const SizedBox(height: 16),
+                // ETA field
+                TextFormField(
+                  controller: _etaController,
+                  decoration: const InputDecoration(
+                    labelText: 'ETA',
+                  ),
+                  keyboardType: TextInputType.datetime,
+                  textCapitalization: TextCapitalization.characters,
+                  style: const TextStyle(letterSpacing: 1.5),
+                  inputFormatters: [UpperCaseTextFormatter()],
+                  onChanged: (value) {
+                    setState(() {});
+                  },
+                  validator: (value) {
+                    if (value == null || value.isEmpty) {
+                      return 'ENTER ETA';
+                    }
+                    if (_parseTime(value) == null) {
+                      return 'INVALID TIME FORMAT (HH:MM)';
+                    }
+                    return null;
+                  },
+                ),
+                const SizedBox(height: 16),
+                // POB field (for Local/Circuit)
+                TextFormField(
+                  controller: _pobController,
+                  decoration: const InputDecoration(labelText: 'POB'),
+                  keyboardType: TextInputType.number,
+                  textCapitalization: TextCapitalization.characters,
+                  style: const TextStyle(letterSpacing: 1.5),
+                  inputFormatters: [UpperCaseTextFormatter()],
+                  validator: (value) {
+                    if (value == null || value.isEmpty) {
+                      return 'ENTER POB';
+                    }
+                    return null;
+                  },
+                ),
+                const SizedBox(height: 16),
               ],
               if (_sunriseTime != null && _sunsetTime != null) ...[
                 Padding(
@@ -969,6 +1151,7 @@ Future<void> sendBookingToAPI(Map<String, dynamic> booking, {BuildContext? conte
   }
 
   Future<void> trySubmit() async {
+    print('DEBUG: trySubmit called');
     try {
       final departure = booking["departure"]?.toString() ?? '';
       final destination = (booking["destination"] == null || booking["destination"].toString().trim().isEmpty)
@@ -991,6 +1174,7 @@ Future<void> sendBookingToAPI(Map<String, dynamic> booking, {BuildContext? conte
           "type": booking["typeOfFlight"] ?? "",
           "etd": booking["etd"],
           "eta": booking["eta"],
+          "date": booking["date"], // <-- Ensure correct date is sent
         }),
       );
 

@@ -7,7 +7,7 @@ import 'home_screen.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 void main() {
-	runApp(const MyApp());
+  runApp(const MyApp());
 }
 
 class MyApp extends StatelessWidget {
@@ -20,7 +20,19 @@ class MyApp extends StatelessWidget {
       theme: ThemeData(
         colorScheme: ColorScheme.fromSeed(seedColor: Colors.deepPurple),
       ),
-      home: const RegisterScreen(),
+      home: FutureBuilder<bool>(
+        future: _checkRegistrationComplete(),
+        builder: (context, snapshot) {
+          if (!snapshot.hasData) {
+            return const Center(child: CircularProgressIndicator());
+          }
+          if (snapshot.data == true) {
+            return const HomeScreen();
+          } else {
+            return const RegisterScreen();
+          }
+        },
+      ),
       routes: {
         '/flight-log': (context) => const FlightLogPage(),
         '/home': (context) => const HomeScreen(),

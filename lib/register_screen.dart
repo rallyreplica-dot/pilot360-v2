@@ -13,6 +13,15 @@ class RegisterScreen extends StatefulWidget {
 }
 
 class _RegisterScreenState extends State<RegisterScreen> {
+      // DEV: Quick set registration complete for development
+      Future<void> devSetRegistrationComplete() async {
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.setBool('registrationComplete', true);
+        if (!mounted) return;
+        Navigator.of(context).pushReplacement(
+          MaterialPageRoute(builder: (context) => HomeScreen(aircraftList: [], homeAirfield: null)),
+        );
+      }
     // Airfields selection
     List<Map<String, String>> allAirfields = [];
     String? selectedAirfieldIcao;
@@ -88,6 +97,15 @@ class _RegisterScreenState extends State<RegisterScreen> {
           child: Column(
             children: [
               const Pilot360Logo(width: 300, height: 300),
+              // DEV: Quick login button
+              Padding(
+                padding: const EdgeInsets.only(bottom: 16.0),
+                child: ElevatedButton(
+                  style: ElevatedButton.styleFrom(backgroundColor: Colors.green),
+                  onPressed: devSetRegistrationComplete,
+                  child: const Text('DEV: Skip Registration'),
+                ),
+              ),
               if (!nameEntered)
                 TextFormField(
                   controller: nameController,
