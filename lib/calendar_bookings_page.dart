@@ -39,6 +39,7 @@ class _CalendarBookingsPageState extends State<CalendarBookingsPage> {
   List<_BookingEvent> events = [];
   bool useApi = true; // Always use API mode by default
   Timer? _pollingTimer;
+  late final CalendarController _calendarController;
   DateTime? _selectedDate;
   _BookingEvent? _selectedBooking;
 
@@ -56,6 +57,7 @@ class _CalendarBookingsPageState extends State<CalendarBookingsPage> {
   @override
   void initState() {
     super.initState();
+    _calendarController = CalendarController();
     useApi = true; // Always use API mode on page open
     _loadBookingsAndPreserveSelection();
     // Start polling every 10 seconds
@@ -66,6 +68,7 @@ class _CalendarBookingsPageState extends State<CalendarBookingsPage> {
   @override
   void dispose() {
     _pollingTimer?.cancel();
+    _calendarController.dispose();
     super.dispose();
   }
 
@@ -79,10 +82,7 @@ class _CalendarBookingsPageState extends State<CalendarBookingsPage> {
 
   Future<void> _loadBookingsAndPreserveSelection() async {
     print('CALENDAR: loadBookings called, useApi: ' + useApi.toString());
-    final prevSelectedDate = _selectedDate;
-    final prevSelectedBookingKey = _selectedBooking?.bookingKey;
     if (!mounted) return;
-    setState(() => isLoading = true);
     if (useApi) {
       try {
         print('CALENDAR: About to fetch bookings from API');
@@ -209,16 +209,18 @@ class _CalendarBookingsPageState extends State<CalendarBookingsPage> {
         print('EVENTS COUNT: ${loadedEvents.length}');
         print(loadedEvents);
         print('CALENDAR: Loaded ${loadedEvents.length} bookings, skipped $skipped invalid entries.');
+        final selectedDate = _selectedDate;
+        final selectedBookingKey = _selectedBooking?.bookingKey;
         _BookingEvent? newSelectedBooking;
-        if (prevSelectedBookingKey != null) {
-          final match = loadedEvents.where((e) => e.bookingKey == prevSelectedBookingKey);
+        if (selectedBookingKey != null) {
+          final match = loadedEvents.where((e) => e.bookingKey == selectedBookingKey);
           newSelectedBooking = match.isNotEmpty ? match.first : null;
         }
         if (!mounted) return;
         setState(() {
           events = List<_BookingEvent>.from(loadedEvents);
           isLoading = false;
-          _selectedDate = prevSelectedDate;
+          _selectedDate = selectedDate;
           _selectedBooking = newSelectedBooking;
         });
       } catch (e) {
@@ -298,16 +300,18 @@ class _CalendarBookingsPageState extends State<CalendarBookingsPage> {
           }
         } catch (_) {}
       }
+      final selectedDate = _selectedDate;
+      final selectedBookingKey = _selectedBooking?.bookingKey;
       _BookingEvent? newSelectedBooking;
-      if (prevSelectedBookingKey != null) {
-        final match = loadedEvents.where((e) => e.bookingKey == prevSelectedBookingKey);
+      if (selectedBookingKey != null) {
+        final match = loadedEvents.where((e) => e.bookingKey == selectedBookingKey);
         newSelectedBooking = match.isNotEmpty ? match.first : null;
       }
       if (!mounted) return;
       setState(() {
         events = loadedEvents;
         isLoading = false;
-        _selectedDate = prevSelectedDate;
+        _selectedDate = selectedDate;
         _selectedBooking = newSelectedBooking;
       });
     }
@@ -631,6 +635,7 @@ class _CalendarBookingsPageState extends State<CalendarBookingsPage> {
       body: isLoading
           ? const Center(child: CircularProgressIndicator())
           : SfCalendar(
+              controller: _calendarController,
               view: CalendarView.month,
               dataSource: _BookingDataSource(events),
               monthViewSettings: const MonthViewSettings(
@@ -639,6 +644,7 @@ class _CalendarBookingsPageState extends State<CalendarBookingsPage> {
               onTap: (details) {
                 if (details.date != null) {
                   final selectedDate = details.date!;
+                  _calendarController.selectedDate = selectedDate;
                   final bookingsForDay = events.where((event) =>
                     event.start.year == selectedDate.year &&
                     event.start.month == selectedDate.month &&
@@ -794,6 +800,4 @@ class _BookingDataSource extends CalendarDataSource {
 }
 
 // ...existing code...
-
-
 
