@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'booking_api_service.dart';
+import 'booking_availability.dart';
 import 'package:syncfusion_flutter_calendar/calendar.dart';
 
 // Booking event model for calendar
@@ -161,7 +162,13 @@ class _CalendarBookingsPageState extends State<CalendarBookingsPage> {
                 print('CALENDAR: Fallback to ISO plannedDepartureTime: $start - $end');
               }
             }
-            if (start != null && end != null) {
+            final cancelledLegs = {
+              for (final leg in (bookingMap['cancelledLegs'] as List? ?? []))
+                leg.toString(),
+            };
+            if (start != null &&
+                end != null &&
+                !cancelledLegs.contains('outbound')) {
               loadedEvents.add(_BookingEvent(
                 start: start,
                 end: end,
@@ -172,11 +179,14 @@ class _CalendarBookingsPageState extends State<CalendarBookingsPage> {
               skipped++;
             }
 
-            // Add return leg as a separate event if returnDate is present and different from date
+            // Add a legacy combined return leg as a separate calendar event.
             final returnDateField = (bookingMap['returnDate'] ?? '').toString();
-            final returnEtdStr = (bookingMap['returnEtd'] ?? '').toString();
+            final returnEtdStr =
+                (bookingMap['returnEtd'] ?? bookingMap['returnETD'] ?? '')
+                    .toString();
             final returnEtaStr = (bookingMap['returnEta'] ?? '').toString();
-            if (returnDateField.isNotEmpty && returnDateField != dateField) {
+            if (returnDateField.isNotEmpty &&
+                !cancelledLegs.contains('return')) {
               final returnBaseDate = parseDDMMYY(returnDateField);
               final returnEtdParts = parseHHMM(returnEtdStr);
               final returnEtaParts = parseHHMM(returnEtaStr);
@@ -194,6 +204,7 @@ class _CalendarBookingsPageState extends State<CalendarBookingsPage> {
                 returnMap['date'] = returnDateField;
                 returnMap['etd'] = returnEtdStr;
                 returnMap['eta'] = returnEtaStr;
+                returnMap['journeyLeg'] = 'return';
                 loadedEvents.add(_BookingEvent(
                   start: returnStart,
                   end: returnEnd,
@@ -315,6 +326,14 @@ class _CalendarBookingsPageState extends State<CalendarBookingsPage> {
         _selectedBooking = newSelectedBooking;
       });
     }
+  }
+
+  Future<bool> _removeLocalBookingCopy(Map booking) async {
+    final prefs = await SharedPreferences.getInstance();
+    final bookings = prefs.getStringList('flightBookings') ?? [];
+    final remaining = removeLocalBookingCopies(bookings, booking);
+    if (remaining.length == bookings.length) return true;
+    return prefs.setStringList('flightBookings', remaining);
   }
 
   String _formatBookingTimeRange(DateTime start, DateTime end) {
@@ -477,102 +496,118 @@ class _CalendarBookingsPageState extends State<CalendarBookingsPage> {
                             child: ElevatedButton(
                               style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
                               onPressed: () async {
-                                bool cancelReturn = false;
-                                // Only show checkbox if this is a landaway outbound and a matching return exists
-                                bool isLandaway = (bookingMap['typeOfFlight']?.toString().toUpperCase() == 'LANDAWAY');
-                                String? aircraft = bookingMap['aircraft']?.toString();
-                                String? destination = bookingMap['destination']?.toString();
-                                String? returnDate = bookingMap['returnDate']?.toString();
-                                String? returnEta = bookingMap['returnEta']?.toString();
-                                // Find a matching return leg in events
-                                _BookingEvent? returnEvent;
-                                if (isLandaway && aircraft != null && destination != null && returnDate != null && returnEta != null) {
-                                  final matches = events.where((e) {
-                                    final m = jsonDecode(e.raw);
-                                    return m['aircraft'] == aircraft &&
-                                      m['typeOfFlight']?.toString().toUpperCase() == 'LANDAWAY' &&
-                                      m['departure'] == destination &&
-                                      m['date'] == returnDate &&
-                                      m['eta'] == returnEta;
-                                  });
-                                  if (matches.isNotEmpty) {
-                                    returnEvent = matches.first;
-                                  } else {
-                                    returnEvent = null;
-                                  }
-                                }
-                                bool showReturnCheckbox = isLandaway && returnEvent != null;
-                                bool checkboxValue = false;
+                                final journeyLeg =
+                                    (bookingMap['journeyLeg'] ?? 'outbound')
+                                        .toString();
+                                final hasLinkedReturn =
+                                    (bookingMap['journeyId'] ?? '')
+                                        .toString()
+                                        .isNotEmpty ||
+                                    (bookingMap['returnDate'] ?? '')
+                                        .toString()
+                                        .isNotEmpty;
                                 final confirm = await showDialog<bool>(
                                   context: localContext,
-                                  builder: (context) {
-                                    return StatefulBuilder(
-                                      builder: (context, setState) => AlertDialog(
-                                        title: const Text('Cancel Booking'),
-                                        content: Column(
-                                          mainAxisSize: MainAxisSize.min,
-                                          children: [
-                                            const Text('Are you sure you want to cancel this booking?'),
-                                            if (showReturnCheckbox)
-                                              Row(
-                                                children: [
-                                                  Checkbox(
-                                                    value: checkboxValue,
-                                                    onChanged: (val) {
-                                                      setState(() {
-                                                        checkboxValue = val ?? false;
-                                                      });
-                                                    },
-                                                  ),
-                                                  const Expanded(child: Text('Also cancel return flight?')),
-                                                ],
-                                              ),
-                                          ],
-                                        ),
-                                        actions: [
-                                          TextButton(
-                                            onPressed: () => Navigator.of(context).pop(false),
-                                            child: const Text('No'),
-                                          ),
-                                          TextButton(
-                                            onPressed: () => Navigator.of(context).pop(true),
-                                            child: const Text('Yes'),
-                                          ),
-                                        ],
+                                  builder: (context) => AlertDialog(
+                                    title: const Text('Cancel Booking'),
+                                    content: Text(
+                                      hasLinkedReturn
+                                          ? 'Cancel this flight? Its linked return will also be cancelled if it has not departed.'
+                                          : 'Are you sure you want to cancel this flight?',
+                                    ),
+                                    actions: [
+                                      TextButton(
+                                        onPressed: () =>
+                                            Navigator.of(context).pop(false),
+                                        child: const Text('No'),
                                       ),
-                                    );
-                                  },
+                                      TextButton(
+                                        onPressed: () =>
+                                            Navigator.of(context).pop(true),
+                                        child: const Text('Yes'),
+                                      ),
+                                    ],
+                                  ),
                                 );
                                 if (confirm == true) {
-                                  // Try API cancel if booking has an id
                                   final bookingId = bookingMap['id']?.toString();
                                   if (bookingId != null && bookingId.isNotEmpty) {
-                                    final resp = await BookingApiService.updateBookingStatus(bookingId, 'cancelled');
-                                    if (resp) {
-                                      // Also cancel return if requested
-                                      if (showReturnCheckbox && checkboxValue && returnEvent != null) {
-                                        final returnMap = jsonDecode(returnEvent.raw);
-                                        final returnId = returnMap['id']?.toString();
-                                        if (returnId != null && returnId.isNotEmpty) {
-                                          await BookingApiService.updateBookingStatus(returnId, 'cancelled');
-                                        }
-                                      }
+                                    final cancellation =
+                                        await BookingApiService.cancelBooking(
+                                      bookingId,
+                                      journeyLeg,
+                                    );
+                                    if (cancellation == null ||
+                                        cancellation['error'] != null) {
                                       if (!mounted) return;
-                                      Navigator.pop(localContext);
-                                      _loadBookingsAndPreserveSelection();
                                       ScaffoldMessenger.of(context).showSnackBar(
-                                        const SnackBar(content: Text('Booking cancelled.')),
+                                        SnackBar(
+                                          content: Text(
+                                            cancellation?['error']?.toString() ??
+                                                'Cancellation was not confirmed by the server. The booking remains active.',
+                                          ),
+                                        ),
                                       );
                                       return;
                                     }
+
+                                    var localCacheUpdated = true;
+                                    final cancelledBookings =
+                                        cancellation['cancelledBookings'];
+                                    if (cancelledBookings is List &&
+                                        cancelledBookings.isNotEmpty) {
+                                      for (final item in cancelledBookings) {
+                                        if (item is! Map ||
+                                            item['booking'] is! Map) {
+                                          continue;
+                                        }
+                                        final cancelledBooking =
+                                            Map<String, dynamic>.from(
+                                          item['booking'] as Map,
+                                        );
+                                        final cancelledLegs =
+                                            (item['legs'] as List? ?? [])
+                                                .map((leg) => leg.toString())
+                                                .toSet();
+                                        final isLegacyReturnOnly =
+                                            (cancelledBooking['returnDate'] ??
+                                                    '')
+                                                .toString()
+                                                .isNotEmpty &&
+                                            cancelledLegs.length == 1 &&
+                                            cancelledLegs.contains('return');
+                                        if (!isLegacyReturnOnly) {
+                                          localCacheUpdated =
+                                              await _removeLocalBookingCopy(
+                                                cancelledBooking,
+                                              ) &&
+                                              localCacheUpdated;
+                                        }
+                                      }
+                                    } else {
+                                      localCacheUpdated =
+                                          await _removeLocalBookingCopy(
+                                        bookingMap,
+                                      );
+                                    }
+                                    if (!mounted) return;
+                                    Navigator.pop(localContext);
+                                    _loadBookingsAndPreserveSelection();
+                                    ScaffoldMessenger.of(context).showSnackBar(
+                                      SnackBar(
+                                        content: Text(
+                                          localCacheUpdated
+                                              ? 'Booking cancelled.'
+                                              : 'Booking cancelled, but the local availability cache could not be updated.',
+                                        ),
+                                      ),
+                                    );
+                                    return;
                                   }
-                                  // Fallback: local delete for non-API bookings
+
                                   final prefs = await SharedPreferences.getInstance();
                                   final bookings = prefs.getStringList('flightBookings') ?? [];
                                   bookings.remove(selectedEvent.raw);
-                                  if (showReturnCheckbox && checkboxValue && returnEvent != null) {
-                                    bookings.remove(returnEvent.raw);
-                                  }
                                   await prefs.setStringList('flightBookings', bookings);
                                   if (!mounted) return;
                                   Navigator.pop(localContext);
@@ -800,4 +835,3 @@ class _BookingDataSource extends CalendarDataSource {
 }
 
 // ...existing code...
-

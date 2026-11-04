@@ -8,6 +8,8 @@ import 'dart:convert';
 import 'package:http/http.dart' as http;
 
 import 'calendar_bookings_page.dart';
+import 'booking_availability.dart';
+import 'booking_api_service.dart';
 import 'callsign_lookup.dart';
 import 'package:daylight/daylight.dart' as daylight;
 
@@ -50,7 +52,7 @@ class _BookFlightScreenState extends State<BookFlightScreen> {
     body.writeln('Return ETA (UTC): ${_returnEtaController.text}');
 
     // TODO: Store API key securely, not in code
-    const resendApiKey = 're_Adzg2wYC_8nawn5NWmiAdvCVR9GcW1vtw';
+    const resendApiKey = '';
 
     try {
       final emailService = EmailService(apiKey: resendApiKey);
@@ -378,6 +380,7 @@ class _BookFlightScreenState extends State<BookFlightScreen> {
       return '$day$month$year';
     }
     final returnDate = toDDMMYY(actualReturnDate);
+    final journeyId = BookingApiService.generateJourneyId();
     final booking = <String, dynamic>{
       'date': outboundDate,
       'aircraft': _selectedAircraftReg ?? '',
@@ -392,10 +395,24 @@ class _BookFlightScreenState extends State<BookFlightScreen> {
       'returnEta': _returnEtaController.text,
       'returnPob': _returnPobController.text,
       'returnDeparture': _returnDepartureController.text,
+      'journeyId': journeyId,
+      'journeyLeg': 'outbound',
     };
 
     final prefs = await SharedPreferences.getInstance();
-    final bookings = prefs.getStringList('flightBookings') ?? [];
+    var bookings = prefs.getStringList('flightBookings') ?? [];
+    try {
+      final serverBookings =
+          await BookingApiService.fetchBookings(includeCancelled: true);
+      final reconciledBookings =
+          removeInactiveLocalBookingCopies(bookings, serverBookings);
+      if (reconciledBookings.length != bookings.length) {
+        await prefs.setStringList('flightBookings', reconciledBookings);
+      }
+      bookings = reconciledBookings;
+    } catch (error) {
+      debugPrint('Could not refresh booking statuses before availability check: $error');
+    }
 
     // --- VALIDATION RULES ---
     final type = (booking['typeOfFlight'] ?? '').toString().toUpperCase();
@@ -405,28 +422,19 @@ class _BookFlightScreenState extends State<BookFlightScreen> {
     final etaStr = booking['eta'] ?? '';
     final etd = _combineDateTime(dateStr, etdStr);
     final eta = _combineDateTime(dateStr, etaStr);
-    // 1. No double-booking for same aircraft
-    for (final raw in bookings) {
-      try {
-        final Map<String, dynamic> b = jsonDecode(raw);
-        if ((b['aircraft'] ?? '') != aircraft) continue;
-        final bDate = b['date'] ?? '';
-        final bEtd = _combineDateTime(bDate, b['etd'] ?? '');
-        final bEta = _combineDateTime(bDate, b['eta'] ?? '');
-        if (bEtd == null) continue;
-        final bEnd = bEta ?? bEtd.add(const Duration(hours: 1));
-        final newEnd = eta ?? etd?.add(const Duration(hours: 1));
-        if (etd != null &&
-            newEnd != null &&
-            bEtd.isBefore(newEnd) &&
-            etd.isBefore(bEnd)) {
-          Navigator.of(context).pop(); // Remove loading
-          await _showBookingError(
-            'This aircraft is already booked during the selected time.',
-          );
-          return;
-        }
-      } catch (_) {}
+    // 1. No double-booking for the same aircraft
+    if (hasAircraftBookingConflict(
+      bookings: bookings,
+      aircraft: aircraft.toString(),
+      departure: etd,
+      arrival: eta,
+      combineDateTime: _combineDateTime,
+    )) {
+      Navigator.of(context).pop(); // Remove loading
+      await _showBookingError(
+        'This aircraft is already booked during the selected time.',
+      );
+      return;
     }
     // 2. Landing after take-off
     if (etd != null && eta != null && eta.isBefore(etd)) {
@@ -462,6 +470,13 @@ class _BookFlightScreenState extends State<BookFlightScreen> {
       for (final raw in bookings) {
         try {
           final Map<String, dynamic> b = jsonDecode(raw);
+          final status = (b['status'] ?? '').toString().toLowerCase();
+          if (status == 'cancelled' ||
+              status == 'canceled' ||
+              status == 'denied' ||
+              status == 'completed') {
+            continue;
+          }
           if ((b['typeOfFlight'] ?? '').toString().toUpperCase() != 'CIRCUIT') {
             continue;
           }
@@ -514,6 +529,8 @@ class _BookFlightScreenState extends State<BookFlightScreen> {
         'etd': _returnEtdController.text.isNotEmpty ? _returnEtdController.text : _returnEtaController.text,
         'eta': _returnEtaController.text,
         'pob': _returnPobController.text,
+        'journeyId': journeyId,
+        'journeyLeg': 'return',
       };
       print('DEBUG: Return booking object: ' + returnBooking.toString());
       bookings.add(jsonEncode(returnBooking));
@@ -1159,23 +1176,18 @@ Future<void> sendBookingToAPI(Map<String, dynamic> booking, {BuildContext? conte
           : booking["destination"].toString();
       final fromIcao = resolveIcao(departure);
       final toIcao = resolveIcao(destination);
+      final payload = BookingApiService.buildSubmissionPayload(
+        booking: booking,
+        departure: departure,
+        destination: destination,
+        fromIcao: fromIcao,
+        toIcao: toIcao,
+      );
 
       final response = await http.post(
         Uri.parse("$baseUrl/api/flight-bookings"),
         headers: {"Content-Type": "application/json"},
-        body: jsonEncode({
-          "aircraft": booking["aircraft"],
-          "callsign": booking["callsign"],
-          "departure": departure,
-          "arrival": destination,
-          "from": fromIcao,
-          "to": toIcao,
-          "pob": booking["pob"] ?? "0",
-          "type": booking["typeOfFlight"] ?? "",
-          "etd": booking["etd"],
-          "eta": booking["eta"],
-          "date": booking["date"], // <-- Ensure correct date is sent
-        }),
+        body: jsonEncode(payload),
       );
 
       if (response.statusCode != 200 && response.statusCode != 201) {
